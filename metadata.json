@@ -1,0 +1,6 @@
+{
+  "name": "Photo Studio — Passport Photo Maker & Photo Editor",
+  "description": "Professional browser-based passport photo maker, portrait retouching studio, background changer, and print sheet generator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
