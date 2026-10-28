@@ -4,7 +4,8 @@ import {
   FlipHorizontal, FlipVertical, Undo2, Redo2, Eye, EyeOff,
   Sparkles, Sliders, Image as ImageIcon, Paintbrush, Compass,
   Shirt, Grid, Printer, Download, Check, AlertCircle, RefreshCw,
-  ArrowRight, ArrowLeft, CheckCircle2, MessageSquare, Pipette
+  ArrowRight, ArrowLeft, CheckCircle2, MessageSquare, Pipette,
+  Crop, Lock, Unlock, Move
 } from 'lucide-react';
 import {
   StudioProject, ImageAdjustments, Transformations, CropState,
@@ -16,7 +17,7 @@ import {
   loadImage, renderTransformedCanvas, applyAdjustmentsToImageData,
   applySharpen, applyVignette, processBackgroundRemoval,
   applyLocalAIEnhancement, applyRetouchStrokes, getCroppedCanvas, mmToPixels,
-  samplePixelColor
+  samplePixelColor, exportCroppedPassportPhoto
 } from '../services/imageProcessing';
 import { PrintSheetWorkspace } from './PrintSheetWorkspace';
 
@@ -112,20 +113,210 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     historyIndexRef.current = newHistory.length - 1;
   }, []);
 
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     if (historyIndexRef.current > 0) {
       historyIndexRef.current -= 1;
       const prev = historyRef.current[historyIndexRef.current];
       onUpdateProject(() => prev);
     }
-  };
+  }, [onUpdateProject]);
 
-  const handleRedo = () => {
+  const handleRedo = useCallback(() => {
     if (historyIndexRef.current < historyRef.current.length - 1) {
       historyIndexRef.current += 1;
       const next = historyRef.current[historyIndexRef.current];
       onUpdateProject(() => next);
     }
+  }, [onUpdateProject]);
+
+  // Global Keyboard Shortcuts (Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z, Ctrl+P)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return;
+      }
+
+      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+      const modifier = isMac ? e.metaKey : e.ctrlKey;
+
+      if (modifier && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+      } else if (modifier && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+      } else if (modifier && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        goToStep(5);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo, handleRedo]);
+
+  // Crop interactive dragging state
+  const cropDragRef = useRef<{
+    isDragging: boolean;
+    handle: 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w' | null;
+    startX: number;
+    startY: number;
+    startCrop: CropState;
+  }>({
+    isDragging: false,
+    handle: null,
+    startX: 0,
+    startY: 0,
+    startCrop: project.crop,
+  });
+
+  const handleCropPointerDown = (
+    e: React.PointerEvent,
+    handle: 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w'
+  ) => {
+    e.stopPropagation();
+    try {
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+    cropDragRef.current = {
+      isDragging: true,
+      handle,
+      startX: e.clientX,
+      startY: e.clientY,
+      startCrop: { ...project.crop },
+    };
+  };
+
+  const handleCropPointerMove = (e: React.PointerEvent) => {
+    if (!cropDragRef.current.isDragging || !cropDragRef.current.handle) return;
+    const canvas = viewportCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const deltaXPct = ((e.clientX - cropDragRef.current.startX) / rect.width) * 100;
+    const deltaYPct = ((e.clientY - cropDragRef.current.startY) / rect.height) * 100;
+
+    const { handle, startCrop } = cropDragRef.current;
+    let newCrop = { ...startCrop };
+
+    if (handle === 'move') {
+      let nextX = startCrop.x + deltaXPct;
+      let nextY = startCrop.y + deltaYPct;
+      nextX = Math.max(0, Math.min(100 - startCrop.width, nextX));
+      nextY = Math.max(0, Math.min(100 - startCrop.height, nextY));
+      newCrop.x = Number(nextX.toFixed(2));
+      newCrop.y = Number(nextY.toFixed(2));
+    } else {
+      let x1 = startCrop.x;
+      let y1 = startCrop.y;
+      let x2 = startCrop.x + startCrop.width;
+      let y2 = startCrop.y + startCrop.height;
+
+      if (handle.includes('w')) x1 = Math.max(0, Math.min(x2 - 10, startCrop.x + deltaXPct));
+      if (handle.includes('e')) x2 = Math.min(100, Math.max(x1 + 10, startCrop.x + startCrop.width + deltaXPct));
+      if (handle.includes('n')) y1 = Math.max(0, Math.min(y2 - 10, startCrop.y + deltaYPct));
+      if (handle.includes('s')) y2 = Math.min(100, Math.max(y1 + 10, startCrop.y + startCrop.height + deltaYPct));
+
+      let width = x2 - x1;
+      let height = y2 - y1;
+
+      // Maintain aspect ratio if locked
+      if (newCrop.lockAspect) {
+        const canvasAspect = canvas.width / canvas.height;
+        const targetPhysicalAspect = newCrop.aspectRatio || (selectedPreset.widthMm / selectedPreset.heightMm);
+        const pctAspect = targetPhysicalAspect / canvasAspect;
+
+        if (handle === 'e' || handle === 'w') {
+          height = width / pctAspect;
+          if (y1 + height > 100) {
+            height = 100 - y1;
+            width = height * pctAspect;
+          }
+        } else {
+          width = height * pctAspect;
+          if (x1 + width > 100) {
+            width = 100 - x1;
+            height = width / pctAspect;
+          }
+        }
+      }
+
+      newCrop = {
+        ...newCrop,
+        x: Number(Math.max(0, x1).toFixed(2)),
+        y: Number(Math.max(0, y1).toFixed(2)),
+        width: Number(Math.max(10, Math.min(100 - x1, width)).toFixed(2)),
+        height: Number(Math.max(10, Math.min(100 - y1, height)).toFixed(2)),
+      };
+    }
+
+    onUpdateProject(prev => ({
+      ...prev,
+      crop: newCrop,
+    }));
+  };
+
+  const handleCropPointerUp = (e: React.PointerEvent) => {
+    if (cropDragRef.current.isDragging) {
+      cropDragRef.current.isDragging = false;
+      cropDragRef.current.handle = null;
+      try {
+        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
+      pushHistory(project);
+    }
+  };
+
+  const handleAutoCenterCrop = () => {
+    const canvas = viewportCanvasRef.current;
+    const canvasAspect = canvas && canvas.height > 0 ? canvas.width / canvas.height : 1;
+    const targetPhysicalAspect = selectedPreset.widthMm / selectedPreset.heightMm;
+    const pctAspect = targetPhysicalAspect / canvasAspect;
+
+    let height = 75;
+    let width = height * pctAspect;
+    if (width > 85) {
+      width = 85;
+      height = width / pctAspect;
+    }
+    const x = Math.max(0, (100 - width) / 2);
+    const y = Math.max(0, (100 - height) / 2);
+
+    const newCrop: CropState = {
+      ...project.crop,
+      x: Number(x.toFixed(2)),
+      y: Number(y.toFixed(2)),
+      width: Number(width.toFixed(2)),
+      height: Number(height.toFixed(2)),
+      lockAspect: true,
+      aspectRatio: targetPhysicalAspect,
+    };
+
+    onUpdateProject(prev => ({ ...prev, crop: newCrop }));
+    pushHistory({ ...project, crop: newCrop });
+  };
+
+  const handleResetCropToFull = () => {
+    const newCrop: CropState = {
+      ...project.crop,
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+      lockAspect: false,
+    };
+    onUpdateProject(prev => ({ ...prev, crop: newCrop }));
+    pushHistory({ ...project, crop: newCrop });
   };
 
   // Main rendering pipeline
@@ -449,15 +640,19 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
   };
 
   const getPreparedCroppedCanvas = (): HTMLCanvasElement => {
-    if (!processedCanvasRef.current) {
-      const fallback = document.createElement('canvas');
-      fallback.width = 413;
-      fallback.height = 531;
-      return fallback;
-    }
     const targetW = mmToPixels(customWidthMm, 300);
     const targetH = mmToPixels(customHeightMm, 300);
-    return getCroppedCanvas(processedCanvasRef.current, project.crop, targetW, targetH);
+
+    if (sourceImageRef.current) {
+      return exportCroppedPassportPhoto(sourceImageRef.current, project, targetW, targetH);
+    }
+    if (processedCanvasRef.current) {
+      return getCroppedCanvas(processedCanvasRef.current, project.crop, targetW, targetH);
+    }
+    const fallback = document.createElement('canvas');
+    fallback.width = targetW;
+    fallback.height = targetH;
+    return fallback;
   };
 
   // Step 5: Full-screen Print Sheet Workspace
@@ -516,27 +711,38 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
           })}
         </div>
 
-        {/* Right Stepper Actions: Undo, Redo, Compare */}
-        <div className="flex items-center gap-2 shrink-0">
-
-          <div className="flex items-center gap-1">
+        {/* Right Stepper Actions: Undo (Ctrl+Z), Redo (Ctrl+Y), Print (Ctrl+P), Compare */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          <div className="flex items-center gap-1 bg-slate-900/90 border border-slate-800 p-0.5 rounded-xl">
             <button
               onClick={handleUndo}
               disabled={historyIndexRef.current <= 0}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-30 transition-colors cursor-pointer"
-              title="Undo"
+              className="flex items-center gap-1 px-2 py-1 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-30 transition-colors cursor-pointer text-xs"
+              title="Undo (Ctrl+Z / ⌘Z)"
             >
-              <Undo2 className="w-4 h-4" />
+              <Undo2 className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="hidden xl:inline text-[10px] font-mono text-slate-400">Ctrl+Z</span>
             </button>
             <button
               onClick={handleRedo}
               disabled={historyIndexRef.current >= historyRef.current.length - 1}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-30 transition-colors cursor-pointer"
-              title="Redo"
+              className="flex items-center gap-1 px-2 py-1 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-30 transition-colors cursor-pointer text-xs"
+              title="Redo (Ctrl+Y / ⌘Y)"
             >
-              <Redo2 className="w-4 h-4" />
+              <Redo2 className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="hidden xl:inline text-[10px] font-mono text-slate-400">Ctrl+Y</span>
             </button>
           </div>
+
+          <button
+            onClick={() => goToStep(5)}
+            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 hover:border-cyan-400 text-slate-200 hover:text-cyan-300 transition-colors cursor-pointer"
+            title="Quick Print Sheet (Ctrl+P / ⌘P)"
+          >
+            <Printer className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden md:inline">Print</span>
+            <span className="text-[10px] font-mono text-slate-400 bg-slate-800 px-1 rounded">Ctrl+P</span>
+          </button>
 
           <button
             onMouseDown={() => setShowOriginal(true)}
@@ -585,14 +791,14 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
                   </p>
                 </div>
 
-                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                   {PASSPORT_PRESETS.map(preset => (
                     <button
                       key={preset.id}
                       onClick={() => handleSelectPreset(preset)}
                       className={`w-full text-left p-2.5 rounded-xl border transition-all cursor-pointer ${
                         selectedPreset.id === preset.id
-                          ? 'border-cyan-400 bg-cyan-950/30 text-white'
+                          ? 'border-cyan-400 bg-cyan-950/30 text-white shadow-sm shadow-cyan-950/40'
                           : 'border-slate-800 bg-slate-800/40 hover:border-slate-700'
                       }`}
                     >
@@ -605,6 +811,55 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
                       <p className="text-[10px] text-slate-400 mt-0.5 truncate">{preset.description}</p>
                     </button>
                   ))}
+                </div>
+
+                {/* Manual Crop & Face Matching Box Controls */}
+                <div className="pt-2 border-t border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-white text-xs flex items-center gap-1.5">
+                      <Crop className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Manual Crop &amp; Face Fit</span>
+                    </span>
+                    <button
+                      onClick={() => {
+                        const newLock = !project.crop.lockAspect;
+                        onUpdateProject(prev => ({
+                          ...prev,
+                          crop: { ...prev.crop, lockAspect: newLock },
+                        }));
+                      }}
+                      className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium border cursor-pointer transition-colors ${
+                        project.crop.lockAspect
+                          ? 'bg-cyan-950/40 border-cyan-500/50 text-cyan-300'
+                          : 'bg-slate-800 border-slate-700 text-slate-400'
+                      }`}
+                      title="Lock aspect ratio to selected country standard"
+                    >
+                      {project.crop.lockAspect ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+                      <span>{project.crop.lockAspect ? 'Ratio Locked' : 'Free Aspect'}</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={handleAutoCenterCrop}
+                      className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-cyan-400 rounded-lg text-slate-200 transition-all cursor-pointer text-[11px] font-semibold"
+                    >
+                      <Compass className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Auto-Center Face</span>
+                    </button>
+                    <button
+                      onClick={handleResetCropToFull}
+                      className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-300 transition-colors cursor-pointer text-[11px]"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Full Image</span>
+                    </button>
+                  </div>
+
+                  <div className="p-2.5 bg-cyan-950/20 border border-cyan-500/20 rounded-lg text-[11px] text-cyan-200/90 leading-relaxed">
+                    💡 <span className="font-semibold text-cyan-300">Face Matching:</span> Drag the cyan crop box over the face. Align eyes with the solid <span className="font-semibold text-cyan-300">Eye Level</span> line and chin with the <span className="font-semibold text-cyan-300">Chin</span> line.
+                  </div>
                 </div>
 
                 {/* Straighten & Rotate controls */}
@@ -1181,47 +1436,198 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
               />
             )}
 
-            {/* Passport Biometric Overlay Guides */}
-            {showGuides && (
-              <div className="absolute inset-0 pointer-events-none border border-cyan-400/40">
+            {/* Interactive Crop Box Overlay for Manual Cropping & Face Alignment */}
+            {currentStep === 1 ? (
+              <div
+                className="absolute inset-0 select-none overflow-hidden"
+                onPointerMove={handleCropPointerMove}
+                onPointerUp={handleCropPointerUp}
+              >
+                {/* 4 Scrim Overlays around the crop box to dim the outside */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: `${project.crop.y}%`,
+                  }}
+                  className="bg-black/60 pointer-events-none"
+                />
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: `${project.crop.y + project.crop.height}%`,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                  }}
+                  className="bg-black/60 pointer-events-none"
+                />
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: `${project.crop.y}%`,
+                    left: 0,
+                    width: `${project.crop.x}%`,
+                    height: `${project.crop.height}%`,
+                  }}
+                  className="bg-black/60 pointer-events-none"
+                />
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: `${project.crop.y}%`,
+                    left: `${project.crop.x + project.crop.width}%`,
+                    right: 0,
+                    height: `${project.crop.height}%`,
+                  }}
+                  className="bg-black/60 pointer-events-none"
+                />
+
+                {/* The Interactive Crop Box */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: `${project.crop.x}%`,
+                    top: `${project.crop.y}%`,
+                    width: `${project.crop.width}%`,
+                    height: `${project.crop.height}%`,
+                  }}
+                  className="border-2 border-cyan-400 shadow-[0_0_0_1px_rgba(0,0,0,0.8),0_0_20px_rgba(34,211,238,0.25)] touch-none cursor-move"
+                  onPointerDown={e => handleCropPointerDown(e, 'move')}
+                >
+                  {/* Biometric Passport Face Alignment Guides INSIDE the crop box */}
+                  {showGuides && (
+                    <div className="absolute inset-0 pointer-events-none overflow-hidden">
+                      {/* Eye Level Guide line (42% from top of crop) */}
+                      <div
+                        style={{ top: '42%' }}
+                        className="absolute left-0 right-0 border-t border-cyan-400/90 flex items-center justify-end px-1.5 shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
+                      >
+                        <span className="text-[8px] sm:text-[9px] font-mono font-semibold text-cyan-200 bg-slate-950/90 px-1 py-0.5 rounded border border-cyan-500/40">
+                          Eye Level
+                        </span>
+                      </div>
+
+                      {/* Crown (Hair top) Guide line (14% from top of crop) */}
+                      <div
+                        style={{ top: '14%' }}
+                        className="absolute left-0 right-0 border-t border-dashed border-cyan-400/60 flex items-center justify-end px-1.5"
+                      >
+                        <span className="text-[8px] sm:text-[9px] font-mono text-cyan-300 bg-slate-950/80 px-1 py-0.2 rounded">
+                          Crown
+                        </span>
+                      </div>
+
+                      {/* Chin Guide line (78% from top of crop) */}
+                      <div
+                        style={{ top: '78%' }}
+                        className="absolute left-0 right-0 border-t border-dashed border-cyan-400/60 flex items-center justify-end px-1.5"
+                      >
+                        <span className="text-[8px] sm:text-[9px] font-mono text-cyan-300 bg-slate-950/80 px-1 py-0.2 rounded">
+                          Chin
+                        </span>
+                      </div>
+
+                      {/* Vertical Symmetry Center line */}
+                      <div className="absolute top-0 bottom-0 left-1/2 border-l border-cyan-400/40" />
+
+                      {/* Biometric Head Oval (70-80% height head silhouette) */}
+                      <div
+                        style={{
+                          left: '18%',
+                          right: '18%',
+                          top: '14%',
+                          bottom: '22%',
+                          borderRadius: '50% 50% 45% 45%',
+                          border: '1.5px dashed rgba(34, 211, 238, 0.75)',
+                          boxShadow: '0 0 10px rgba(34, 211, 238, 0.2)',
+                        }}
+                        className="absolute pointer-events-none"
+                      />
+
+                      {/* Current standard badge */}
+                      <div className="absolute top-1 left-1 bg-slate-950/90 text-cyan-300 text-[9px] font-mono font-semibold px-1.5 py-0.5 rounded border border-slate-700 pointer-events-none">
+                        {selectedPreset.name} ({customWidthMm}×{customHeightMm}mm)
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 4 Corner Handles */}
+                  <div
+                    className="absolute -top-2 -left-2 w-4 h-4 bg-cyan-400 border border-slate-950 rounded-sm cursor-nwse-resize shadow-md hover:scale-125 transition-transform"
+                    onPointerDown={e => handleCropPointerDown(e, 'nw')}
+                    title="Resize crop box"
+                  />
+                  <div
+                    className="absolute -top-2 -right-2 w-4 h-4 bg-cyan-400 border border-slate-950 rounded-sm cursor-nesw-resize shadow-md hover:scale-125 transition-transform"
+                    onPointerDown={e => handleCropPointerDown(e, 'ne')}
+                    title="Resize crop box"
+                  />
+                  <div
+                    className="absolute -bottom-2 -left-2 w-4 h-4 bg-cyan-400 border border-slate-950 rounded-sm cursor-nesw-resize shadow-md hover:scale-125 transition-transform"
+                    onPointerDown={e => handleCropPointerDown(e, 'sw')}
+                    title="Resize crop box"
+                  />
+                  <div
+                    className="absolute -bottom-2 -right-2 w-4 h-4 bg-cyan-400 border border-slate-950 rounded-sm cursor-nwse-resize shadow-md hover:scale-125 transition-transform"
+                    onPointerDown={e => handleCropPointerDown(e, 'se')}
+                    title="Resize crop box"
+                  />
+
+                  {/* 4 Edge Handles */}
+                  <div
+                    className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-6 h-2 bg-cyan-400/90 border border-slate-950 rounded-sm cursor-ns-resize shadow"
+                    onPointerDown={e => handleCropPointerDown(e, 'n')}
+                  />
+                  <div
+                    className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-6 h-2 bg-cyan-400/90 border border-slate-950 rounded-sm cursor-ns-resize shadow"
+                    onPointerDown={e => handleCropPointerDown(e, 's')}
+                  />
+                  <div
+                    className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-2 h-6 bg-cyan-400/90 border border-slate-950 rounded-sm cursor-ew-resize shadow"
+                    onPointerDown={e => handleCropPointerDown(e, 'w')}
+                  />
+                  <div
+                    className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-2 h-6 bg-cyan-400/90 border border-slate-950 rounded-sm cursor-ew-resize shadow"
+                    onPointerDown={e => handleCropPointerDown(e, 'e')}
+                  />
+                </div>
+              </div>
+            ) : showGuides ? (
+              /* In other steps: subtle crop border and guidelines */
+              <div
+                style={{
+                  position: 'absolute',
+                  left: `${project.crop.x}%`,
+                  top: `${project.crop.y}%`,
+                  width: `${project.crop.width}%`,
+                  height: `${project.crop.height}%`,
+                }}
+                className="pointer-events-none border border-cyan-400/50 shadow-[0_0_0_9999px_rgba(0,0,0,0.5)]"
+              >
                 <div
                   style={{ top: '42%' }}
-                  className="absolute left-0 right-0 border-t border-cyan-400/60 flex items-center justify-end px-2"
+                  className="absolute left-0 right-0 border-t border-cyan-400/50 flex items-center justify-end px-1.5"
                 >
-                  <span className="text-[9px] font-mono text-cyan-300 bg-slate-950/80 px-1 rounded">
+                  <span className="text-[8px] font-mono text-cyan-300 bg-slate-950/80 px-1 rounded">
                     Eye Level
                   </span>
                 </div>
                 <div
-                  style={{ top: '15%' }}
-                  className="absolute left-0 right-0 border-t border-dashed border-cyan-400/40 flex items-center justify-end px-2"
-                >
-                  <span className="text-[9px] font-mono text-cyan-300 bg-slate-950/80 px-1 rounded">
-                    Crown (Top)
-                  </span>
-                </div>
-                <div
-                  style={{ bottom: '15%' }}
-                  className="absolute left-0 right-0 border-t border-dashed border-cyan-400/40 flex items-center justify-end px-2"
-                >
-                  <span className="text-[9px] font-mono text-cyan-300 bg-slate-950/80 px-1 rounded">
-                    Chin
-                  </span>
-                </div>
-                <div
                   style={{
-                    left: '20%',
-                    right: '20%',
-                    top: '15%',
-                    bottom: '15%',
+                    left: '18%',
+                    right: '18%',
+                    top: '14%',
+                    bottom: '22%',
                     borderRadius: '50% 50% 45% 45%',
-                    border: '1.5px dashed rgba(103, 232, 249, 0.5)',
+                    border: '1px dashed rgba(34, 211, 238, 0.4)',
                   }}
                   className="absolute"
                 />
-                <div className="absolute top-0 bottom-0 left-1/2 border-l border-cyan-400/30" />
               </div>
-            )}
+            ) : null}
           </div>
         </div>
       </div>

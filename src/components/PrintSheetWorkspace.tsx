@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { 
   ArrowLeft, Download, Printer, RotateCw, Copy, Trash2, 
   Lock, Unlock, RefreshCw, ZoomIn, ZoomOut, CheckCircle2 
@@ -56,6 +56,59 @@ export const PrintSheetWorkspace: React.FC<PrintSheetWorkspaceProps> = ({
 
   const paperWidthMm = config.orientation === 'portrait' ? selectedPaper.widthMm : selectedPaper.heightMm;
   const paperHeightMm = config.orientation === 'portrait' ? selectedPaper.heightMm : selectedPaper.widthMm;
+
+  // Memoize photo data URL to prevent repeated costly canvas re-encodings on every state update
+  const photoDataUrl = useMemo(() => {
+    try {
+      if (croppedCanvas && croppedCanvas.width > 0 && croppedCanvas.height > 0) {
+        return croppedCanvas.toDataURL('image/png');
+      }
+    } catch (e) {
+      console.warn('Failed to encode cropped canvas data URL:', e);
+    }
+    return '';
+  }, [croppedCanvas]);
+
+  // Auto-fit zoom so the sheet is 100% visible inside the container upon loading
+  const handleFitToScreen = useCallback(() => {
+    if (!containerRef.current) return;
+    const { clientWidth, clientHeight } = containerRef.current;
+    if (clientWidth > 50 && clientHeight > 50) {
+      const paperPxW = paperWidthMm * 3.78;
+      const paperPxH = paperHeightMm * 3.78;
+      const padding = 64;
+      const scaleX = (clientWidth - padding) / paperPxW;
+      const scaleY = (clientHeight - padding) / paperPxH;
+      const optimalFit = Math.min(scaleX, scaleY, 0.95);
+      if (optimalFit > 0) {
+        setZoom(Math.max(0.2, Math.min(1.5, Number(optimalFit.toFixed(2)))));
+      }
+    }
+  }, [paperWidthMm, paperHeightMm]);
+
+  // Run auto-fit on initial mount and on paper/orientation change
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      handleFitToScreen();
+    }, 50);
+    window.addEventListener('resize', handleFitToScreen);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('resize', handleFitToScreen);
+    };
+  }, [selectedPaper.id, config.orientation, handleFitToScreen]);
+
+  // Direct print shortcut listener (Ctrl+P / Cmd+P)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        executeDirectPrint(config, selectedPaper, croppedCanvas);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [config, selectedPaper, croppedCanvas]);
 
   // Initialize or re-calculate auto grid if items are empty or paper/copies changed
   useEffect(() => {
@@ -473,102 +526,125 @@ export const PrintSheetWorkspace: React.FC<PrintSheetWorkspaceProps> = ({
         {/* Right Side: Interactive Print Sheet Preview Canvas: Order 1 on mobile, Order 2 on desktop */}
         <div
           ref={containerRef}
-          className="order-1 lg:order-2 h-[42vh] lg:h-full lg:flex-1 shrink-0 lg:shrink bg-slate-950 p-3 sm:p-6 flex items-center justify-center overflow-auto relative select-none border-b lg:border-b-0 border-slate-800"
+          className="order-1 lg:order-2 h-[48vh] sm:h-[55vh] lg:h-full lg:flex-1 shrink-0 lg:shrink bg-slate-950 p-4 sm:p-8 overflow-auto flex flex-col relative select-none border-b lg:border-b-0 border-slate-800"
         >
           {/* Zoom controls floating */}
-          <div className="absolute bottom-4 right-4 z-20 flex items-center gap-1 bg-slate-900/90 border border-slate-800 p-1 rounded-lg backdrop-blur-md">
+          <div className="absolute bottom-4 right-4 z-20 flex items-center gap-1.5 bg-slate-900/95 border border-slate-700/80 p-1.5 rounded-xl backdrop-blur-md shadow-2xl">
             <button
-              onClick={() => setZoom(z => Math.max(0.5, z - 0.1))}
-              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded cursor-pointer"
+              onClick={handleFitToScreen}
+              className="px-2 py-1 text-[11px] font-semibold text-cyan-300 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+              title="Fit entire sheet in view"
+            >
+              Fit Sheet
+            </button>
+            <button
+              onClick={() => setZoom(1)}
+              className="px-1.5 py-1 text-[11px] font-mono text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+              title="100% Print Size"
+            >
+              100%
+            </button>
+            <div className="h-3 w-px bg-slate-700 mx-0.5" />
+            <button
+              onClick={() => setZoom(z => Math.max(0.2, Number((z - 0.1).toFixed(2))))}
+              className="p-1.5 text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
               title="Zoom out"
             >
               <ZoomOut className="w-3.5 h-3.5" />
             </button>
-            <span className="px-2 text-xs font-mono text-slate-300">
+            <span className="px-1.5 text-xs font-mono text-cyan-300 font-semibold min-w-[42px] text-center">
               {Math.round(zoom * 100)}%
             </span>
             <button
-              onClick={() => setZoom(z => Math.min(2, z + 0.1))}
-              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded cursor-pointer"
+              onClick={() => setZoom(z => Math.min(2.5, Number((z + 0.1).toFixed(2))))}
+              className="p-1.5 text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
               title="Zoom in"
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
           </div>
 
-          {/* Paper Sheet Representation */}
-          <div
-            id="print-sheet-paper-preview"
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            style={{
-              width: `${paperWidthMm * 3.78 * zoom}px`,
-              height: `${paperHeightMm * 3.78 * zoom}px`,
-              backgroundColor: '#FFFFFF',
-              position: 'relative',
-              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7)',
-              transition: 'width 0.1s ease, height 0.1s ease',
-            }}
-            className="rounded-sm overflow-hidden touch-none"
-          >
-            {/* Margin border guide */}
+          {/* Centering wrapper with m-auto so photos never lie above screen and can scroll completely */}
+          <div className="m-auto shrink-0 flex items-center justify-center py-6">
             <div
+              id="print-sheet-paper-preview"
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
               style={{
-                position: 'absolute',
-                left: `${(config.marginMm / paperWidthMm) * 100}%`,
-                top: `${(config.marginMm / paperHeightMm) * 100}%`,
-                right: `${(config.marginMm / paperWidthMm) * 100}%`,
-                bottom: `${(config.marginMm / paperHeightMm) * 100}%`,
-                border: '1px dashed #E2E8F0',
-                pointerEvents: 'none',
+                width: `${paperWidthMm * 3.78 * zoom}px`,
+                height: `${paperHeightMm * 3.78 * zoom}px`,
+                backgroundColor: '#FFFFFF',
+                position: 'relative',
+                boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.12)',
+                transition: dragRef.current.isDragging ? 'none' : 'width 0.1s ease, height 0.1s ease',
               }}
-            />
+              className="rounded-sm overflow-hidden touch-none"
+            >
+              {/* Margin border guide */}
+              <div
+                style={{
+                  position: 'absolute',
+                  left: `${(config.marginMm / paperWidthMm) * 100}%`,
+                  top: `${(config.marginMm / paperHeightMm) * 100}%`,
+                  right: `${(config.marginMm / paperWidthMm) * 100}%`,
+                  bottom: `${(config.marginMm / paperHeightMm) * 100}%`,
+                  border: '1px dashed #CBD5E1',
+                  pointerEvents: 'none',
+                }}
+              />
 
-            {/* Rendered Photos on Sheet */}
-            {config.items.map(item => {
-              const leftPct = (item.xMm / paperWidthMm) * 100;
-              const topPct = (item.yMm / paperHeightMm) * 100;
-              const widthPct = (item.widthMm / paperWidthMm) * 100;
-              const heightPct = (item.heightMm / paperHeightMm) * 100;
-              const isSelected = selectedItemId === item.id;
+              {/* Rendered Photos on Sheet */}
+              {config.items.map(item => {
+                const leftPct = (item.xMm / paperWidthMm) * 100;
+                const topPct = (item.yMm / paperHeightMm) * 100;
+                const widthPct = (item.widthMm / paperWidthMm) * 100;
+                const heightPct = (item.heightMm / paperHeightMm) * 100;
+                const isSelected = selectedItemId === item.id;
 
-              return (
-                <div
-                  key={item.id}
-                  onPointerDown={e => handlePointerDown(e, item)}
-                  style={{
-                    position: 'absolute',
-                    left: `${leftPct}%`,
-                    top: `${topPct}%`,
-                    width: `${widthPct}%`,
-                    height: `${heightPct}%`,
-                    transform: `rotate(${item.rotation}deg)`,
-                    cursor: item.locked ? 'default' : 'grab',
-                    zIndex: isSelected ? 10 : 1,
-                  }}
-                  className={`group transition-shadow ${
-                    isSelected ? 'ring-2 ring-cyan-500 shadow-md' : 'hover:ring-1 hover:ring-cyan-300'
-                  }`}
-                >
-                  <img
-                    src={croppedCanvas.toDataURL()}
-                    alt="Passport copy"
-                    draggable={false}
-                    className="w-full h-full object-cover block pointer-events-none"
+                return (
+                  <div
+                    key={item.id}
+                    onPointerDown={e => handlePointerDown(e, item)}
                     style={{
-                      border: showCutLines ? '1px solid #D1D5DB' : 'none',
+                      position: 'absolute',
+                      left: `${leftPct}%`,
+                      top: `${topPct}%`,
+                      width: `${widthPct}%`,
+                      height: `${heightPct}%`,
+                      transform: `rotate(${item.rotation}deg)`,
+                      cursor: item.locked ? 'default' : 'grab',
+                      zIndex: isSelected ? 10 : 1,
                     }}
-                  />
+                    className={`group transition-shadow ${
+                      isSelected ? 'ring-2 ring-cyan-500 shadow-lg' : 'hover:ring-1 hover:ring-cyan-300'
+                    }`}
+                  >
+                    {photoDataUrl ? (
+                      <img
+                        src={photoDataUrl}
+                        alt="Passport copy"
+                        draggable={false}
+                        className="w-full h-full object-cover block pointer-events-none"
+                        style={{
+                          border: showCutLines ? '1px solid #D1D5DB' : 'none',
+                        }}
+                      />
+                    ) : (
+                      <div className="w-full h-full bg-slate-200 flex items-center justify-center text-[10px] text-slate-500">
+                        Photo
+                      </div>
+                    )}
 
-                  {/* Corner indicator badge when selected */}
-                  {isSelected && (
-                    <div className="absolute top-1 right-1 bg-cyan-500 text-[#0B1020] text-[9px] font-bold px-1 rounded shadow">
-                      {item.widthMm}×{item.heightMm}mm
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+                    {/* Corner indicator badge when selected */}
+                    {isSelected && (
+                      <div className="absolute top-1 right-1 bg-cyan-500 text-[#0B1020] text-[9px] font-bold px-1 rounded shadow">
+                        {item.widthMm}×{item.heightMm}mm
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       </div>
