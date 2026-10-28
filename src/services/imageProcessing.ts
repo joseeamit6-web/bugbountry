@@ -256,8 +256,26 @@ export function applyVignette(canvas: HTMLCanvasElement, strength: number): void
 }
 
 /**
- * Advanced High-Fidelity Background Removal & Replacement
- * Uses perimeter flood-fill connectivity + human perceptual distance + Gaussian alpha feathering
+ * Samples RGB color from a canvas at coordinates (x, y)
+ */
+export function samplePixelColor(
+  canvas: HTMLCanvasElement,
+  x: number,
+  y: number
+): { r: number; g: number; b: number } {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return { r: 255, g: 255, b: 255 };
+
+  const clX = Math.max(0, Math.min(canvas.width - 1, Math.round(x)));
+  const clY = Math.max(0, Math.min(canvas.height - 1, Math.round(y)));
+  const p = ctx.getImageData(clX, clY, 1, 1).data;
+  return { r: p[0], g: p[1], b: p[2] };
+}
+
+/**
+ * Robust High-Fidelity Background Removal & Color Replacement
+ * Uses multi-zone perimeter sampling, perceptual color space distance,
+ * central portrait & skin/hair tone protection, and smooth sigmoidal feathering.
  */
 export function processBackgroundRemoval(
   canvas: HTMLCanvasElement,
@@ -265,145 +283,138 @@ export function processBackgroundRemoval(
 ): HTMLCanvasElement {
   if (!settings.isRemoved) return canvas;
 
+  const w = canvas.width;
+  const h = canvas.height;
+
   const outputCanvas = document.createElement('canvas');
-  outputCanvas.width = canvas.width;
-  outputCanvas.height = canvas.height;
+  outputCanvas.width = w;
+  outputCanvas.height = h;
   const outCtx = outputCanvas.getContext('2d', { willReadFrequently: true });
   if (!outCtx) return canvas;
 
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return canvas;
 
-  const w = canvas.width;
-  const h = canvas.height;
   const imgData = ctx.getImageData(0, 0, w, h);
   const data = imgData.data;
 
-  // 1. Fill replacement background if solid color
-  if (settings.mode === 'color' && settings.color !== 'transparent') {
+  // 1. Build Background Reference Palette
+  const bgPalette: Array<{ r: number; g: number; b: number }> = [];
+
+  if (settings.sampledBgColor) {
+    // User picked explicit background color via eyedropper
+    bgPalette.push(settings.sampledBgColor);
+  } else {
+    // Multi-zone perimeter sampling: top corners, upper edges, and head flanking zones
+    const sampleBox = (startX: number, endX: number, startY: number, endY: number) => {
+      let sumR = 0, sumG = 0, sumB = 0, count = 0;
+      for (let py = Math.max(0, startY); py < Math.min(h, endY); py += 2) {
+        for (let px = Math.max(0, startX); px < Math.min(w, endX); px += 2) {
+          const idx = (py * w + px) * 4;
+          sumR += data[idx];
+          sumG += data[idx + 1];
+          sumB += data[idx + 2];
+          count++;
+        }
+      }
+      if (count > 0) {
+        bgPalette.push({
+          r: sumR / count,
+          g: sumG / count,
+          b: sumB / count,
+        });
+      }
+    };
+
+    const edgeW = Math.max(6, Math.floor(w * 0.08));
+    const edgeH = Math.max(6, Math.floor(h * 0.08));
+
+    // Zone 1: Top-left corner
+    sampleBox(2, edgeW, 2, edgeH);
+    // Zone 2: Top-right corner
+    sampleBox(w - edgeW, w - 2, 2, edgeH);
+    // Zone 3: Upper-left flank
+    sampleBox(2, edgeW, Math.floor(h * 0.15), Math.floor(h * 0.25));
+    // Zone 4: Upper-right flank
+    sampleBox(w - edgeW, w - 2, Math.floor(h * 0.15), Math.floor(h * 0.25));
+    // Zone 5: Top-center left (between corner and head)
+    sampleBox(Math.floor(w * 0.15), Math.floor(w * 0.25), 2, edgeH);
+    // Zone 6: Top-center right (between head and corner)
+    sampleBox(Math.floor(w * 0.75), Math.floor(w * 0.85), 2, edgeH);
+  }
+
+  if (bgPalette.length === 0) {
+    bgPalette.push({ r: 245, g: 245, b: 245 });
+  }
+
+  // 2. Tolerance & Feathering parameters
+  const toleranceVal = settings.tolerance || 48;
+  const featherVal = settings.feather || 6;
+  const threshold = toleranceVal * 2.3;
+  const feather = Math.max(6, featherVal * 3.0);
+
+  // 3. Render Solid Replacement Background if color mode
+  const isTransparent = settings.mode === 'transparent' || settings.color === 'transparent';
+  if (!isTransparent && settings.color) {
     outCtx.fillStyle = settings.color;
     outCtx.fillRect(0, 0, w, h);
+  } else {
+    outCtx.clearRect(0, 0, w, h);
   }
 
-  // 2. Multi-point perimeter background sampling
-  const borderSamples: { r: number; g: number; b: number }[] = [];
-  const stepX = Math.max(1, Math.floor(w / 16));
-  const stepY = Math.max(1, Math.floor(h / 16));
-
-  // Sample top, left, right edges
-  for (let x = 0; x < w; x += stepX) {
-    const idx = (0 * w + x) * 4;
-    borderSamples.push({ r: data[idx], g: data[idx + 1], b: data[idx + 2] });
-  }
-  for (let y = 0; y < Math.floor(h * 0.7); y += stepY) {
-    const leftIdx = (y * w + 0) * 4;
-    const rightIdx = (y * w + (w - 1)) * 4;
-    borderSamples.push({ r: data[leftIdx], g: data[leftIdx + 1], b: data[leftIdx + 2] });
-    borderSamples.push({ r: data[rightIdx], g: data[rightIdx + 1], b: data[rightIdx + 2] });
-  }
-
-  let avgR = 0, avgG = 0, avgB = 0;
-  for (const s of borderSamples) {
-    avgR += s.r;
-    avgG += s.g;
-    avgB += s.b;
-  }
-  avgR /= borderSamples.length;
-  avgG /= borderSamples.length;
-  avgB /= borderSamples.length;
-
-  const tolerance = (settings.tolerance || 32) * 1.8;
-  const feather = Math.max(3, settings.feather || 6);
-
-  // Perceptual distance calculator
-  const colorDist = (r: number, g: number, b: number) => {
-    const dr = r - avgR;
-    const dg = g - avgG;
-    const db = b - avgB;
-    return Math.sqrt(2 * dr * dr + 4 * dg * dg + 3 * db * db);
-  };
-
-  // 3. BFS Flood Fill from edges to guarantee interior portrait pixels are preserved!
-  const isBackground = new Uint8Array(w * h);
-  const queue: number[] = [];
-
-  // Seed boundary queue (top, upper-left, upper-right borders)
-  for (let x = 0; x < w; x++) {
-    queue.push(x); // y = 0
-  }
-  for (let y = 1; y < h; y++) {
-    queue.push(y * w); // x = 0
-    queue.push(y * w + (w - 1)); // x = w - 1
-  }
-
-  while (queue.length > 0) {
-    const pos = queue.pop()!;
-    if (isBackground[pos]) continue;
-
-    const px = pos % w;
-    const py = Math.floor(pos / w);
-    const idx = pos * 4;
-
-    const r = data[idx];
-    const g = data[idx + 1];
-    const b = data[idx + 2];
-
-    const d = colorDist(r, g, b);
-
-    // Subject protection: center ellipse protection for human head & shoulders
-    const cx = (px - w / 2) / (w * 0.42);
-    const cy = (py - h * 0.45) / (h * 0.42);
-    const isInteriorSubject = (cx * cx + cy * cy) < 0.75;
-
-    const threshold = isInteriorSubject ? tolerance * 0.65 : tolerance;
-
-    if (d < threshold) {
-      isBackground[pos] = 1;
-
-      // Expand to 4-way neighbors
-      if (px > 0 && !isBackground[pos - 1]) queue.push(pos - 1);
-      if (px < w - 1 && !isBackground[pos + 1]) queue.push(pos + 1);
-      if (py > 0 && !isBackground[pos - w]) queue.push(pos - w);
-      if (py < h - 1 && !isBackground[pos + w]) queue.push(pos + w);
-    }
-  }
-
-  // 4. Generate smooth alpha mask with soft feather boundary
+  // 4. Generate Masked Foreground ImageData
   const fgData = outCtx.createImageData(w, h);
   const fg = fgData.data;
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      const pos = y * w + x;
-      const idx = pos * 4;
+      const idx = (y * w + x) * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
 
-      let alpha = isBackground[pos] === 1 ? 0 : 255;
-
-      // Soft feathering if near boundary
-      if (alpha === 255 && feather > 0) {
-        // Check local 3x3 neighbor background count
-        let bgCount = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const ny = y + dy;
-            const nx = x + dx;
-            if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
-              if (isBackground[ny * w + nx] === 1) bgCount++;
-            }
-          }
-        }
-        if (bgCount > 0) {
-          alpha = Math.round(255 * (1 - (bgCount / 9) * 0.8));
+      // Minimum perceptual distance to any background sample
+      let minDist = Infinity;
+      for (let k = 0; k < bgPalette.length; k++) {
+        const ref = bgPalette[k];
+        const dr = r - ref.r;
+        const dg = g - ref.g;
+        const db = b - ref.b;
+        const d = Math.sqrt(2 * dr * dr + 4 * dg * dg + 3 * db * db);
+        if (d < minDist) {
+          minDist = d;
         }
       }
+      let dist = minDist;
 
-      fg[idx] = data[idx];
-      fg[idx + 1] = data[idx + 1];
-      fg[idx + 2] = data[idx + 2];
+      // Subject Protection: central portrait zone & skin / hair preservation
+      const normX = (x - w / 2) / (w * 0.45);
+      const normY = (y - h * 0.52) / (h * 0.44);
+      const inCenterSubject = (normX * normX + normY * normY) < 1.0;
+      const isSkin = r > 45 && g > 28 && b > 18 && r > g && (r - g) >= 8 && (r - b) >= 8;
+      const isHair = y < h * 0.65 && r < 55 && g < 55 && b < 55;
+
+      if (inCenterSubject && (isSkin || isHair)) {
+        // Boost distance significantly so skin/face/hair are never accidentally clipped
+        dist *= 2.8;
+      }
+
+      // Compute smooth alpha
+      let alpha = 255;
+      if (dist <= threshold) {
+        alpha = 0;
+      } else if (dist < threshold + feather) {
+        alpha = Math.round(255 * ((dist - threshold) / feather));
+      }
+
+      fg[idx] = r;
+      fg[idx + 1] = g;
+      fg[idx + 2] = b;
       fg[idx + 3] = alpha;
     }
   }
 
+  // Draw masked foreground
   const tempCanvas = document.createElement('canvas');
   tempCanvas.width = w;
   tempCanvas.height = h;

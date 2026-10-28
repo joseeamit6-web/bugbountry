@@ -15,7 +15,8 @@ import { OUTFIT_CATALOG } from '../constants/outfits';
 import {
   loadImage, renderTransformedCanvas, applyAdjustmentsToImageData,
   applySharpen, applyVignette, processBackgroundRemoval,
-  applyLocalAIEnhancement, applyRetouchStrokes, getCroppedCanvas, mmToPixels
+  applyLocalAIEnhancement, applyRetouchStrokes, getCroppedCanvas, mmToPixels,
+  samplePixelColor
 } from '../services/imageProcessing';
 import { PrintSheetWorkspace } from './PrintSheetWorkspace';
 
@@ -52,6 +53,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
   const [aiStrength, setAiStrength] = useState(70);
   const [isApplyingAI, setIsApplyingAI] = useState(false);
   const [customBgColor, setCustomBgColor] = useState('#A5C9EB');
+  const [isSamplingBgColor, setIsSamplingBgColor] = useState(false);
   const [brushMode, setBrushMode] = useState<'smooth' | 'heal' | 'brighten' | 'eraser'>('smooth');
   const [brushRadius, setBrushRadius] = useState(20);
   const [brushStrength, setBrushStrength] = useState(50);
@@ -340,9 +342,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     }, 100);
   };
 
-  // Retouching Handlers
+  // Pointer interaction handler for Retouching & Eyedropper Sampling
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (currentStep !== 4) return;
     const canvas = viewportCanvasRef.current;
     if (!canvas) return;
 
@@ -352,6 +353,31 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 
     const x = (e.clientX - rect.left) * scaleX;
     const y = (e.clientY - rect.top) * scaleY;
+
+    // Eyedropper sampling in Background Studio
+    if (currentStep === 3 && isSamplingBgColor) {
+      const img = sourceImageRef.current;
+      if (img) {
+        const baseCanvas = renderTransformedCanvas(img, project.transformations);
+        const sampled = samplePixelColor(baseCanvas, x, y);
+        onUpdateProject(prev => {
+          const updated: StudioProject = {
+            ...prev,
+            background: {
+              ...prev.background,
+              isRemoved: true,
+              sampledBgColor: sampled,
+            },
+          };
+          pushHistory(updated);
+          return updated;
+        });
+      }
+      setIsSamplingBgColor(false);
+      return;
+    }
+
+    if (currentStep !== 4) return;
 
     setIsDrawing(true);
     const stroke: RetouchStroke = {
@@ -726,14 +752,15 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
                 <div className="space-y-1">
                   <h3 className="font-semibold text-white text-sm">3. Background Replacement &amp; Custom Color</h3>
                   <p className="text-[11px] text-slate-400">
-                    Swap to official passport colors, pick any custom color, or export transparent PNG.
+                    Replace background with official passport colors, pick any custom color, or export transparent PNG.
                   </p>
                 </div>
 
+                {/* Primary Enable / Disable Toggle */}
                 <div className="flex items-center justify-between p-3.5 bg-slate-800/60 border border-slate-700 rounded-xl">
                   <div>
                     <span className="font-semibold text-white block">Auto Background Removal</span>
-                    <span className="text-[11px] text-slate-400">Segments subject with feathering</span>
+                    <span className="text-[11px] text-slate-400">Perimeter sampling &amp; subject protection</span>
                   </div>
                   <button
                     onClick={handleToggleBackgroundRemoval}
@@ -749,34 +776,112 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 
                 {project.background.isRemoved && (
                   <div className="space-y-3.5">
-                    {/* Custom Color Picker */}
+                    {/* Eyedropper Color Picker Tool */}
                     <div className="p-3 bg-slate-800/60 border border-slate-700 rounded-xl space-y-2">
-                      <span className="text-[11px] font-semibold text-cyan-300 uppercase tracking-wider block">
-                        Custom Background Color Picker
-                      </span>
-                      <div className="flex items-center gap-3">
-                        <input
-                          type="color"
-                          value={customBgColor}
-                          onChange={e => handleSelectBackgroundColor(e.target.value)}
-                          className="w-10 h-10 rounded-lg border border-slate-600 bg-transparent cursor-pointer shrink-0"
-                          title="Pick custom color"
-                        />
-                        <div className="flex-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-cyan-300 uppercase tracking-wider block">
+                          Background Color Sampler
+                        </span>
+                        {project.background.sampledBgColor && (
+                          <button
+                            onClick={() => {
+                              onUpdateProject(prev => ({
+                                ...prev,
+                                background: { ...prev.background, sampledBgColor: undefined },
+                              }));
+                            }}
+                            className="text-[10px] text-slate-400 hover:text-cyan-300 hover:underline cursor-pointer"
+                          >
+                            Reset to Auto
+                          </button>
+                        )}
+                      </div>
+
+                      <button
+                        onClick={() => setIsSamplingBgColor(prev => !prev)}
+                        className={`w-full py-2 px-3 rounded-lg border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                          isSamplingBgColor
+                            ? 'border-cyan-400 bg-cyan-950/40 text-cyan-300 ring-2 ring-cyan-400/50 animate-pulse'
+                            : 'border-slate-700 bg-slate-900/80 text-slate-200 hover:border-slate-600'
+                        }`}
+                      >
+                        <Pipette className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>{isSamplingBgColor ? 'Click background in photo to sample…' : 'Pick Background Color from Photo'}</span>
+                      </button>
+
+                      {project.background.sampledBgColor && (
+                        <div className="flex items-center gap-2 px-2.5 py-1.5 bg-slate-900 rounded-lg text-[11px] text-slate-300 border border-slate-750">
+                          <div
+                            className="w-4 h-4 rounded border border-slate-600 shrink-0"
+                            style={{
+                              backgroundColor: `rgb(${Math.round(project.background.sampledBgColor.r)}, ${Math.round(
+                                project.background.sampledBgColor.g
+                              )}, ${Math.round(project.background.sampledBgColor.b)})`,
+                            }}
+                          />
+                          <span className="font-mono text-cyan-300 text-[10px]">
+                            Sampled Key: RGB({Math.round(project.background.sampledBgColor.r)},{' '}
+                            {Math.round(project.background.sampledBgColor.g)},{' '}
+                            {Math.round(project.background.sampledBgColor.b)})
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Mode Selector: Solid Color vs Transparent */}
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => handleSelectBackgroundColor(customBgColor || '#A5C9EB')}
+                        className={`p-2 rounded-lg border text-center font-semibold text-xs transition-all cursor-pointer ${
+                          project.background.mode !== 'transparent'
+                            ? 'border-cyan-400 bg-cyan-950/20 text-white'
+                            : 'border-slate-800 bg-slate-800/40 text-slate-400 hover:border-slate-700'
+                        }`}
+                      >
+                        Solid Replacement Color
+                      </button>
+                      <button
+                        onClick={() => handleSelectBackgroundColor('transparent')}
+                        className={`p-2 rounded-lg border text-center font-semibold text-xs transition-all cursor-pointer ${
+                          project.background.mode === 'transparent'
+                            ? 'border-cyan-400 bg-cyan-950/20 text-white'
+                            : 'border-slate-800 bg-slate-800/40 text-slate-400 hover:border-slate-700'
+                        }`}
+                      >
+                        Transparent PNG Cutout
+                      </button>
+                    </div>
+
+                    {/* Custom Color Input */}
+                    {project.background.mode !== 'transparent' && (
+                      <div className="p-3 bg-slate-800/60 border border-slate-700 rounded-xl space-y-2">
+                        <span className="text-[11px] font-semibold text-cyan-300 uppercase tracking-wider block">
+                          Custom Replacement Color
+                        </span>
+                        <div className="flex items-center gap-3">
                           <input
-                            type="text"
+                            type="color"
                             value={customBgColor}
                             onChange={e => handleSelectBackgroundColor(e.target.value)}
-                            placeholder="#A5C9EB"
-                            className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 font-mono text-white text-xs uppercase"
+                            className="w-10 h-10 rounded-lg border border-slate-600 bg-transparent cursor-pointer shrink-0"
+                            title="Pick custom color"
                           />
+                          <div className="flex-1">
+                            <input
+                              type="text"
+                              value={customBgColor}
+                              onChange={e => handleSelectBackgroundColor(e.target.value)}
+                              placeholder="#A5C9EB"
+                              className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 font-mono text-white text-xs uppercase"
+                            />
+                          </div>
                         </div>
                       </div>
-                    </div>
+                    )}
 
                     {/* Official Presets */}
                     <span className="font-semibold text-white block text-[11px] uppercase tracking-wider">
-                      Official Presets
+                      Official Standards
                     </span>
                     <div className="grid grid-cols-2 gap-2">
                       {BACKGROUND_PRESET_COLORS.map(item => (
@@ -784,7 +889,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
                           key={item.id}
                           onClick={() => handleSelectBackgroundColor(item.hex)}
                           className={`flex items-center gap-2 p-2 rounded-lg border text-left transition-all cursor-pointer ${
-                            project.background.color === item.hex
+                            (item.hex === 'transparent' && project.background.mode === 'transparent') ||
+                            (project.background.mode !== 'transparent' && project.background.color === item.hex)
                               ? 'border-cyan-400 bg-cyan-950/20 text-white'
                               : 'border-slate-800 bg-slate-800/40 text-slate-300 hover:border-slate-700'
                           }`}
@@ -803,19 +909,19 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
                       ))}
                     </div>
 
-                    {/* Tolerance & Feather */}
+                    {/* Edge Tolerance & Feather Sliders */}
                     <div className="pt-2 space-y-3 border-t border-slate-800">
                       <div className="flex items-center justify-between">
                         <span className="text-slate-400">Edge Tolerance:</span>
                         <span className="font-mono text-cyan-300 font-semibold">
-                          {project.background.tolerance || 32}
+                          {project.background.tolerance || 48}
                         </span>
                       </div>
                       <input
                         type="range"
-                        min="10"
-                        max="70"
-                        value={project.background.tolerance || 32}
+                        min="15"
+                        max="95"
+                        value={project.background.tolerance || 48}
                         onChange={e => {
                           const val = Number(e.target.value);
                           onUpdateProject(prev => ({
@@ -1023,6 +1129,20 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
             </button>
           </div>
 
+          {/* Eyedropper Sampling Active Banner */}
+          {isSamplingBgColor && (
+            <div className="absolute top-2 left-2 z-20 flex items-center gap-2 bg-cyan-950/90 border border-cyan-400 text-cyan-200 px-3 py-1.5 rounded-lg text-xs font-semibold backdrop-blur-md shadow-lg animate-pulse">
+              <Pipette className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Click anywhere on background to sample color</span>
+              <button
+                onClick={() => setIsSamplingBgColor(false)}
+                className="ml-1 text-[10px] bg-cyan-900/60 hover:bg-cyan-800 px-1.5 py-0.5 rounded text-white cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
           {/* Main Photo Canvas */}
           <div
             style={{
@@ -1030,7 +1150,9 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
               transformOrigin: 'center center',
               transition: isDrawing ? 'none' : 'transform 0.1s ease',
             }}
-            className="relative shadow-2xl rounded-sm max-h-[34vh] sm:max-h-[38vh] md:max-h-[75vh] max-w-[85vw]"
+            className={`relative shadow-2xl rounded-sm max-h-[34vh] sm:max-h-[38vh] md:max-h-[75vh] max-w-[85vw] ${
+              project.background.isRemoved ? 'bg-checkerboard' : 'bg-slate-900'
+            }`}
           >
             <canvas
               ref={viewportCanvasRef}
@@ -1038,7 +1160,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
               onPointerMove={handleCanvasPointerMove}
               onPointerUp={handleCanvasPointerUp}
               className={`block max-h-[34vh] sm:max-h-[38vh] md:max-h-[75vh] max-w-[85vw] object-contain rounded-sm ${
-                currentStep === 4 ? 'cursor-crosshair' : 'cursor-default'
+                currentStep === 4 || isSamplingBgColor ? 'cursor-crosshair' : 'cursor-default'
               }`}
             />
 

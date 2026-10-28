@@ -183,7 +183,7 @@ export default function App() {
   };
 
   return (
-    <div className={`w-full max-w-full overflow-x-hidden bg-[#0B1020] text-slate-100 flex flex-col selection:bg-cyan-500/20 selection:text-cyan-300 ${project ? 'h-screen overflow-hidden' : 'min-h-screen'}`}>
+    <div className={`w-full max-w-full overflow-x-hidden bg-[#0B1020] text-slate-100 flex flex-col selection:bg-cyan-500/20 selection:text-cyan-300 ${project ? 'h-[100dvh] max-h-[100dvh] overflow-hidden' : 'min-h-screen'}`}>
       <input
         ref={hiddenFileInputRef}
         type="file"

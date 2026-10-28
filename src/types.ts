@@ -48,9 +48,10 @@ export interface BackgroundSettings {
   isRemoved: boolean;
   mode: 'original' | 'color' | 'transparent';
   color: string;
-  tolerance: number; // 5 to 60
-  feather: number;   // 0 to 20
+  tolerance: number; // 10 to 100
+  feather: number;   // 2 to 30
   invertMask: boolean;
+  sampledBgColor?: { r: number; g: number; b: number };
 }
 
 export interface RetouchPoint {
