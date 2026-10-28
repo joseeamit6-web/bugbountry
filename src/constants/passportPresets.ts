@@ -162,10 +162,13 @@ export const PRINT_PAPERS: PrintPaperFormat[] = [
 ];
 
 export const BACKGROUND_PRESET_COLORS = [
-  { id: 'white', label: 'Pure White', hex: '#FFFFFF', desc: 'Standard for US, India, Canada' },
+  { id: 'white', label: 'Pure White', hex: '#FFFFFF', desc: 'Standard for US, Schengen, India, Canada' },
   { id: 'nepal_blue', label: 'Nepal Blue', hex: '#A5C9EB', desc: 'Official Nepal e-Passport standard' },
   { id: 'off_white', label: 'Off-White', hex: '#F8FAFC', desc: 'Soft neutral studio standard' },
   { id: 'light_gray', label: 'Light Gray', hex: '#E2E8F0', desc: 'Schengen & UK compliant' },
+  { id: 'sky_blue', label: 'Sky Blue', hex: '#BAE6FD', desc: 'Modern ID & corporate profile' },
+  { id: 'royal_blue', label: 'Royal Blue', hex: '#2563EB', desc: 'Formal portrait & badge' },
+  { id: 'classic_red', label: 'Classic Red', hex: '#DC2626', desc: 'Asian visa & festive portraits' },
   { id: 'pale_cream', label: 'Pale Cream', hex: '#FDFBF7', desc: 'UK passport alternative' },
   { id: 'transparent', label: 'Transparent PNG', hex: 'transparent', desc: 'Cutout for graphic design' },
 ];

@@ -111,9 +111,9 @@ export default function App() {
       background: {
         isRemoved: false,
         mode: 'original',
-        color: '#A5C9EB', // Standard Nepal light blue
-        tolerance: 32,
-        feather: 8,
+        color: '#FFFFFF', // Pure White standard
+        tolerance: 48,
+        feather: 6,
         invertMask: false,
       },
       retouchStrokes: [],

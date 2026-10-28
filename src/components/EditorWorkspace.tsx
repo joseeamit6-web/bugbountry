@@ -468,17 +468,20 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     });
   };
 
-  // Background Studio toggles
-  const handleToggleBackgroundRemoval = () => {
+  // Background Studio toggles & One-Tap background remove
+  const handleOneTapRemoveBackground = (targetColor: string = '#FFFFFF') => {
+    setCustomBgColor(targetColor === 'transparent' ? '#FFFFFF' : targetColor);
     onUpdateProject(prev => {
-      const newMode: 'color' | 'original' | 'transparent' = !prev.background.isRemoved ? 'color' : 'original';
+      const isTrans = targetColor === 'transparent';
       const updated: StudioProject = {
         ...prev,
         background: {
           ...prev.background,
-          isRemoved: !prev.background.isRemoved,
-          mode: newMode,
-          color: prev.background.color || '#A5C9EB',
+          isRemoved: true,
+          mode: isTrans ? 'transparent' : 'color',
+          color: isTrans ? 'transparent' : targetColor,
+          tolerance: prev.background.tolerance || 48,
+          feather: prev.background.feather || 6,
         },
       };
       pushHistory(updated);
@@ -486,17 +489,40 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     });
   };
 
-  const handleSelectBackgroundColor = (colorHex: string) => {
-    setCustomBgColor(colorHex);
+  const handleRevertToOriginalBackground = () => {
     onUpdateProject(prev => {
-      const newMode: 'color' | 'original' | 'transparent' = colorHex === 'transparent' ? 'transparent' : 'color';
+      const updated: StudioProject = {
+        ...prev,
+        background: {
+          ...prev.background,
+          isRemoved: false,
+          mode: 'original',
+        },
+      };
+      pushHistory(updated);
+      return updated;
+    });
+  };
+
+  const handleToggleBackgroundRemoval = () => {
+    if (project.background.isRemoved) {
+      handleRevertToOriginalBackground();
+    } else {
+      handleOneTapRemoveBackground(project.background.color || '#FFFFFF');
+    }
+  };
+
+  const handleSelectBackgroundColor = (colorHex: string) => {
+    setCustomBgColor(colorHex === 'transparent' ? '#FFFFFF' : colorHex);
+    onUpdateProject(prev => {
+      const isTrans = colorHex === 'transparent';
       const updated: StudioProject = {
         ...prev,
         background: {
           ...prev.background,
           isRemoved: true,
-          mode: newMode,
-          color: colorHex,
+          mode: isTrans ? 'transparent' : 'color',
+          color: isTrans ? 'transparent' : colorHex,
         },
       };
       pushHistory(updated);
@@ -734,6 +760,26 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
             </button>
           </div>
 
+          {/* One-Tap Remove Background Button */}
+          <button
+            onClick={() => {
+              handleOneTapRemoveBackground('#FFFFFF');
+              goToStep(3);
+            }}
+            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer shadow-sm ${
+              project.background.isRemoved && project.background.color === '#FFFFFF'
+                ? 'bg-emerald-950/60 border border-emerald-500/50 text-emerald-300'
+                : 'bg-cyan-300 hover:bg-cyan-200 text-[#0B1020] font-bold active:scale-95 shadow-cyan-950/50'
+            }`}
+            title="One-Tap Remove Background: Removes background and sets to white"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">
+              {project.background.isRemoved ? 'White BG Active' : 'Remove BG (White)'}
+            </span>
+            <span className="sm:hidden">Remove BG</span>
+          </button>
+
           <button
             onClick={() => goToStep(5)}
             className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 hover:border-cyan-400 text-slate-200 hover:text-cyan-300 transition-colors cursor-pointer"
@@ -860,6 +906,17 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
                   <div className="p-2.5 bg-cyan-950/20 border border-cyan-500/20 rounded-lg text-[11px] text-cyan-200/90 leading-relaxed">
                     💡 <span className="font-semibold text-cyan-300">Face Matching:</span> Drag the cyan crop box over the face. Align eyes with the solid <span className="font-semibold text-cyan-300">Eye Level</span> line and chin with the <span className="font-semibold text-cyan-300">Chin</span> line.
                   </div>
+
+                  <button
+                    onClick={() => {
+                      handleOneTapRemoveBackground('#FFFFFF');
+                      goToStep(3);
+                    }}
+                    className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-cyan-300 hover:bg-cyan-200 text-[#0B1020] rounded-xl transition-all cursor-pointer text-xs font-bold shadow-md shadow-cyan-950/40 active:scale-95"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>One-Tap White Background &amp; Colors →</span>
+                  </button>
                 </div>
 
                 {/* Straighten & Rotate controls */}
@@ -1005,164 +1062,190 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
             {currentStep === 3 && (
               <div className="space-y-4">
                 <div className="space-y-1">
-                  <h3 className="font-semibold text-white text-sm">3. Background Replacement &amp; Custom Color</h3>
+                  <h3 className="font-semibold text-white text-sm">3. Background Replacement &amp; Color Studio</h3>
                   <p className="text-[11px] text-slate-400">
-                    Replace background with official passport colors, pick any custom color, or export transparent PNG.
+                    Remove background with one tap, keep solid white, or pick any official country or custom color.
                   </p>
                 </div>
 
-                {/* Primary Enable / Disable Toggle */}
-                <div className="flex items-center justify-between p-3.5 bg-slate-800/60 border border-slate-700 rounded-xl">
-                  <div>
-                    <span className="font-semibold text-white block">Auto Background Removal</span>
-                    <span className="text-[11px] text-slate-400">Perimeter sampling &amp; subject protection</span>
+                {/* ONE-TAP BACKGROUND REMOVER HERO CARD */}
+                <div className="p-4 bg-gradient-to-br from-cyan-950/40 via-slate-900/90 to-slate-900 border border-cyan-500/40 rounded-2xl shadow-lg space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-xl bg-cyan-400/20 border border-cyan-400/40 flex items-center justify-center text-cyan-300 shrink-0">
+                        <Sparkles className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-400 block">
+                          Instant One-Tap Tool
+                        </span>
+                        <h4 className="text-xs font-bold text-white">One-Tap Remove Background</h4>
+                      </div>
+                    </div>
                   </div>
-                  <button
-                    onClick={handleToggleBackgroundRemoval}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-                      project.background.isRemoved
-                        ? 'bg-cyan-400 text-[#0B1020]'
-                        : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-                    }`}
-                  >
-                    {project.background.isRemoved ? 'Enabled' : 'Disabled'}
-                  </button>
+
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Automatically segments the person and replaces the entire background with clean, professional solid white.
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                    <button
+                      onClick={() => handleOneTapRemoveBackground('#FFFFFF')}
+                      className={`w-full py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md ${
+                        project.background.isRemoved && project.background.color === '#FFFFFF' && project.background.mode !== 'transparent'
+                          ? 'bg-emerald-400 text-slate-950 ring-2 ring-emerald-300 shadow-emerald-950/50'
+                          : 'bg-cyan-300 hover:bg-cyan-200 text-[#0B1020] active:scale-95 shadow-cyan-950/40'
+                      }`}
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      <span>
+                        {project.background.isRemoved && project.background.color === '#FFFFFF' && project.background.mode !== 'transparent'
+                          ? 'White Background Applied ✓'
+                          : 'Remove BG (White BG)'}
+                      </span>
+                    </button>
+
+                    {project.background.isRemoved ? (
+                      <button
+                        onClick={handleRevertToOriginalBackground}
+                        className="w-full py-2.5 px-3 rounded-xl font-medium text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
+                        <span>Restore Original BG</span>
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => handleOneTapRemoveBackground('transparent')}
+                        className="w-full py-2.5 px-3 rounded-xl font-medium text-xs bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                      >
+                        <span>Transparent Cutout</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
 
-                {project.background.isRemoved && (
-                  <div className="space-y-3.5">
-                    {/* Eyedropper Color Picker Tool */}
-                    <div className="p-3 bg-slate-800/60 border border-slate-700 rounded-xl space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-semibold text-cyan-300 uppercase tracking-wider block">
-                          Background Color Sampler
-                        </span>
-                        {project.background.sampledBgColor && (
-                          <button
-                            onClick={() => {
-                              onUpdateProject(prev => ({
-                                ...prev,
-                                background: { ...prev.background, sampledBgColor: undefined },
-                              }));
-                            }}
-                            className="text-[10px] text-slate-400 hover:text-cyan-300 hover:underline cursor-pointer"
-                          >
-                            Reset to Auto
-                          </button>
-                        )}
-                      </div>
-
-                      <button
-                        onClick={() => setIsSamplingBgColor(prev => !prev)}
-                        className={`w-full py-2 px-3 rounded-lg border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                          isSamplingBgColor
-                            ? 'border-cyan-400 bg-cyan-950/40 text-cyan-300 ring-2 ring-cyan-400/50 animate-pulse'
-                            : 'border-slate-700 bg-slate-900/80 text-slate-200 hover:border-slate-600'
-                        }`}
-                      >
-                        <Pipette className="w-3.5 h-3.5 text-cyan-400" />
-                        <span>{isSamplingBgColor ? 'Click background in photo to sample…' : 'Pick Background Color from Photo'}</span>
-                      </button>
-
-                      {project.background.sampledBgColor && (
-                        <div className="flex items-center gap-2 px-2.5 py-1.5 bg-slate-900 rounded-lg text-[11px] text-slate-300 border border-slate-750">
-                          <div
-                            className="w-4 h-4 rounded border border-slate-600 shrink-0"
-                            style={{
-                              backgroundColor: `rgb(${Math.round(project.background.sampledBgColor.r)}, ${Math.round(
-                                project.background.sampledBgColor.g
-                              )}, ${Math.round(project.background.sampledBgColor.b)})`,
-                            }}
-                          />
-                          <span className="font-mono text-cyan-300 text-[10px]">
-                            Sampled Key: RGB({Math.round(project.background.sampledBgColor.r)},{' '}
-                            {Math.round(project.background.sampledBgColor.g)},{' '}
-                            {Math.round(project.background.sampledBgColor.b)})
-                          </span>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Mode Selector: Solid Color vs Transparent */}
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        onClick={() => handleSelectBackgroundColor(customBgColor || '#A5C9EB')}
-                        className={`p-2 rounded-lg border text-center font-semibold text-xs transition-all cursor-pointer ${
-                          project.background.mode !== 'transparent'
-                            ? 'border-cyan-400 bg-cyan-950/20 text-white'
-                            : 'border-slate-800 bg-slate-800/40 text-slate-400 hover:border-slate-700'
-                        }`}
-                      >
-                        Solid Replacement Color
-                      </button>
-                      <button
-                        onClick={() => handleSelectBackgroundColor('transparent')}
-                        className={`p-2 rounded-lg border text-center font-semibold text-xs transition-all cursor-pointer ${
-                          project.background.mode === 'transparent'
-                            ? 'border-cyan-400 bg-cyan-950/20 text-white'
-                            : 'border-slate-800 bg-slate-800/40 text-slate-400 hover:border-slate-700'
-                        }`}
-                      >
-                        Transparent PNG Cutout
-                      </button>
-                    </div>
-
-                    {/* Custom Color Input */}
-                    {project.background.mode !== 'transparent' && (
-                      <div className="p-3 bg-slate-800/60 border border-slate-700 rounded-xl space-y-2">
-                        <span className="text-[11px] font-semibold text-cyan-300 uppercase tracking-wider block">
-                          Custom Replacement Color
-                        </span>
-                        <div className="flex items-center gap-3">
-                          <input
-                            type="color"
-                            value={customBgColor}
-                            onChange={e => handleSelectBackgroundColor(e.target.value)}
-                            className="w-10 h-10 rounded-lg border border-slate-600 bg-transparent cursor-pointer shrink-0"
-                            title="Pick custom color"
-                          />
-                          <div className="flex-1">
-                            <input
-                              type="text"
-                              value={customBgColor}
-                              onChange={e => handleSelectBackgroundColor(e.target.value)}
-                              placeholder="#A5C9EB"
-                              className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 font-mono text-white text-xs uppercase"
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Official Presets */}
-                    <span className="font-semibold text-white block text-[11px] uppercase tracking-wider">
-                      Official Standards
+                {/* BACKGROUND COLOR PICKER & SWATCHES */}
+                <div className="space-y-3 pt-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-white text-xs uppercase tracking-wider flex items-center gap-1.5">
+                      <span>Change Background Color</span>
                     </span>
-                    <div className="grid grid-cols-2 gap-2">
-                      {BACKGROUND_PRESET_COLORS.map(item => (
+                    {project.background.isRemoved && (
+                      <span className="text-[10px] text-cyan-300 font-mono font-medium">
+                        Active: {project.background.mode === 'transparent' ? 'Transparent PNG' : project.background.color}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Preset Colors Grid */}
+                  <div className="grid grid-cols-2 gap-2">
+                    {BACKGROUND_PRESET_COLORS.map(item => {
+                      const isSelected =
+                        project.background.isRemoved &&
+                        ((item.hex === 'transparent' && project.background.mode === 'transparent') ||
+                          (project.background.mode !== 'transparent' && project.background.color?.toUpperCase() === item.hex.toUpperCase()));
+
+                      return (
                         <button
                           key={item.id}
                           onClick={() => handleSelectBackgroundColor(item.hex)}
-                          className={`flex items-center gap-2 p-2 rounded-lg border text-left transition-all cursor-pointer ${
-                            (item.hex === 'transparent' && project.background.mode === 'transparent') ||
-                            (project.background.mode !== 'transparent' && project.background.color === item.hex)
-                              ? 'border-cyan-400 bg-cyan-950/20 text-white'
+                          className={`flex items-center gap-2 p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                            isSelected
+                              ? 'border-cyan-400 bg-cyan-950/30 text-white ring-1 ring-cyan-400 shadow-sm'
                               : 'border-slate-800 bg-slate-800/40 text-slate-300 hover:border-slate-700'
                           }`}
                         >
                           <div
-                            className="w-5 h-5 rounded-md border border-slate-600 shrink-0"
+                            className="w-6 h-6 rounded-lg border border-slate-600 shrink-0 shadow-sm flex items-center justify-center"
                             style={{
-                              backgroundColor: item.hex === 'transparent' ? '#334155' : item.hex,
+                              backgroundColor: item.hex === 'transparent' ? '#1e293b' : item.hex,
                             }}
-                          />
+                          >
+                            {isSelected && (
+                              <Check
+                                className={`w-3.5 h-3.5 ${
+                                  item.hex === '#FFFFFF' || item.hex === '#F8FAFC' || item.hex === '#FDFBF7' || item.hex === '#BAE6FD'
+                                    ? 'text-slate-900'
+                                    : 'text-white'
+                                }`}
+                                strokeWidth={3}
+                              />
+                            )}
+                          </div>
                           <div className="overflow-hidden">
                             <span className="font-semibold block truncate text-xs">{item.label}</span>
                             <span className="text-[10px] text-slate-400 block truncate">{item.desc}</span>
                           </div>
                         </button>
-                      ))}
+                      );
+                    })}
+                  </div>
+
+                  {/* Custom Hex & Native Color Picker */}
+                  <div className="p-3 bg-slate-800/60 border border-slate-700 rounded-xl space-y-2">
+                    <span className="text-[11px] font-semibold text-cyan-300 uppercase tracking-wider block">
+                      Custom Color Picker
+                    </span>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="color"
+                        value={customBgColor.startsWith('#') ? customBgColor : '#FFFFFF'}
+                        onChange={e => handleSelectBackgroundColor(e.target.value)}
+                        className="w-10 h-10 rounded-lg border border-slate-600 bg-transparent cursor-pointer shrink-0"
+                        title="Pick custom background color"
+                      />
+                      <div className="flex-1">
+                        <input
+                          type="text"
+                          value={customBgColor}
+                          onChange={e => handleSelectBackgroundColor(e.target.value)}
+                          placeholder="#FFFFFF"
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 font-mono text-white text-xs uppercase"
+                        />
+                      </div>
+                      <button
+                        onClick={() => handleSelectBackgroundColor(customBgColor || '#FFFFFF')}
+                        className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-semibold cursor-pointer"
+                      >
+                        Apply
+                      </button>
                     </div>
+                  </div>
+
+                  {/* Eyedropper Color Picker Tool */}
+                  <div className="p-3 bg-slate-800/60 border border-slate-700 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-cyan-300 uppercase tracking-wider block">
+                        Eyedropper Sampler
+                      </span>
+                      {project.background.sampledBgColor && (
+                        <button
+                          onClick={() => {
+                            onUpdateProject(prev => ({
+                              ...prev,
+                              background: { ...prev.background, sampledBgColor: undefined },
+                            }));
+                          }}
+                          className="text-[10px] text-slate-400 hover:text-cyan-300 hover:underline cursor-pointer"
+                        >
+                          Reset Sampler
+                        </button>
+                      )}
+                    </div>
+
+                    <button
+                      onClick={() => setIsSamplingBgColor(prev => !prev)}
+                      className={`w-full py-2 px-3 rounded-lg border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                        isSamplingBgColor
+                          ? 'border-cyan-400 bg-cyan-950/40 text-cyan-300 ring-2 ring-cyan-400/50 animate-pulse'
+                          : 'border-slate-700 bg-slate-900/80 text-slate-200 hover:border-slate-600'
+                      }`}
+                    >
+                      <Pipette className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>{isSamplingBgColor ? 'Click anywhere on photo to sample…' : 'Sample Color from Photo'}</span>
+                    </button>
+                  </div>
+                </div>
 
                     {/* Edge Tolerance & Feather Sliders */}
                     <div className="pt-2 space-y-3 border-t border-slate-800">
@@ -1210,8 +1293,6 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
                     </div>
                   </div>
                 )}
-              </div>
-            )}
 
             {/* STEP 4: RETOUCH BRUSH & FORMAL OUTFITS */}
             {currentStep === 4 && (
