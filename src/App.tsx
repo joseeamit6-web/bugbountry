@@ -71,6 +71,60 @@ export default function App() {
     height: number,
     name: string
   ): StudioProject => {
+    const personId = 'person_' + Date.now();
+    const initialAdjustments = {
+      brightness: 0,
+      contrast: 0,
+      saturation: 0,
+      exposure: 0,
+      highlights: 0,
+      shadows: 0,
+      temperature: 0,
+      tint: 0,
+      sharpness: 0,
+      blur: 0,
+      grayscale: 0,
+      sepia: 0,
+      vignette: 0,
+    };
+    const initialTransformations = {
+      fineRotation: 0,
+      rotation: 0,
+      flipH: false,
+      flipV: false,
+    };
+    const initialCrop = {
+      x: 5,
+      y: 5,
+      width: 90,
+      height: 90,
+      presetId: 'nepal_epassport',
+      lockAspect: true,
+      aspectRatio: 35 / 45,
+    };
+    const initialBg = {
+      isRemoved: false,
+      mode: 'original' as const,
+      color: '#A5C9EB', // Standard Nepal light blue
+      model: 'isnet-neural' as const,
+    };
+
+    const initialPerson = {
+      id: personId,
+      name: 'Person 1',
+      imageSrc,
+      naturalWidth: width,
+      naturalHeight: height,
+      adjustments: { ...initialAdjustments },
+      transformations: { ...initialTransformations },
+      crop: { ...initialCrop },
+      background: { ...initialBg },
+      retouchStrokes: [],
+      outfit: null,
+      widthMm: 35,
+      heightMm: 45,
+    };
+
     return {
       id: 'proj_' + Date.now(),
       name: name || 'Passport Project',
@@ -78,44 +132,10 @@ export default function App() {
       imageSrc,
       naturalWidth: width,
       naturalHeight: height,
-      adjustments: {
-        brightness: 0,
-        contrast: 0,
-        saturation: 0,
-        exposure: 0,
-        highlights: 0,
-        shadows: 0,
-        temperature: 0,
-        tint: 0,
-        sharpness: 0,
-        blur: 0,
-        grayscale: 0,
-        sepia: 0,
-        vignette: 0,
-      },
-      transformations: {
-        fineRotation: 0,
-        rotation: 0,
-        flipH: false,
-        flipV: false,
-      },
-      crop: {
-        x: 5,
-        y: 5,
-        width: 90,
-        height: 90,
-        presetId: 'nepal_epassport',
-        lockAspect: true,
-        aspectRatio: 35 / 45,
-      },
-      background: {
-        isRemoved: false,
-        mode: 'original',
-        color: '#FFFFFF', // Pure White standard
-        tolerance: 48,
-        feather: 6,
-        invertMask: false,
-      },
+      adjustments: initialAdjustments,
+      transformations: initialTransformations,
+      crop: initialCrop,
+      background: initialBg,
       retouchStrokes: [],
       outfit: null,
       printSheet: {
@@ -127,6 +147,9 @@ export default function App() {
         items: [],
         autoGrid: true,
       },
+      sheetPhotos: [],
+      people: [initialPerson],
+      activePersonId: personId,
     };
   };
 
@@ -164,7 +187,25 @@ export default function App() {
 
   const handleResumeDraft = () => {
     if (savedDraft) {
-      setProject(savedDraft);
+      const restored = { ...savedDraft };
+      if (!restored.people || restored.people.length === 0) {
+        const pId = 'person_1';
+        restored.people = [{
+          id: pId,
+          name: 'Person 1',
+          imageSrc: restored.imageSrc,
+          naturalWidth: restored.naturalWidth,
+          naturalHeight: restored.naturalHeight,
+          adjustments: restored.adjustments,
+          transformations: restored.transformations,
+          crop: restored.crop,
+          background: restored.background,
+          retouchStrokes: restored.retouchStrokes || [],
+          outfit: restored.outfit || null,
+        }];
+        restored.activePersonId = pId;
+      }
+      setProject(restored);
       setSavedDraft(null);
     }
   };

@@ -5,11 +5,12 @@ import {
   Sparkles, Sliders, Image as ImageIcon, Paintbrush, Compass,
   Shirt, Grid, Printer, Download, Check, AlertCircle, RefreshCw,
   ArrowRight, ArrowLeft, CheckCircle2, MessageSquare, Pipette,
-  Crop, Lock, Unlock, Move
+  Plus, User, Users, Pencil, Trash2, X, Upload
 } from 'lucide-react';
 import {
   StudioProject, ImageAdjustments, Transformations, CropState,
-  BackgroundSettings, RetouchStroke, OutfitOverlay, PassportPreset
+  BackgroundSettings, RetouchStroke, OutfitOverlay, PassportPreset,
+  StudioPerson
 } from '../types';
 import { PASSPORT_PRESETS, BACKGROUND_PRESET_COLORS } from '../constants/passportPresets';
 import { OUTFIT_CATALOG } from '../constants/outfits';
@@ -17,9 +18,11 @@ import {
   loadImage, renderTransformedCanvas, applyAdjustmentsToImageData,
   applySharpen, applyVignette, processBackgroundRemoval,
   applyLocalAIEnhancement, applyRetouchStrokes, getCroppedCanvas, mmToPixels,
-  samplePixelColor, exportCroppedPassportPhoto
+  removeBackgroundWithAI
 } from '../services/imageProcessing';
 import { PrintSheetWorkspace } from './PrintSheetWorkspace';
+import sampleManImg from '../assets/images/sample_portrait_man_1793180916362.jpg';
+import sampleWomanImg from '../assets/images/sample_portrait_woman_1793180916339.jpg';
 
 interface EditorWorkspaceProps {
   project: StudioProject;
@@ -32,7 +35,7 @@ export type WizardStep = 1 | 2 | 3 | 4 | 5;
 const WIZARD_STEPS = [
   { step: 1, id: 'crop', title: 'Passport & Crop', desc: 'Select standard & frame' },
   { step: 2, id: 'enhance', title: 'AI Enhance', desc: 'Clarity & portrait lighting' },
-  { step: 3, id: 'background', title: 'Background', desc: 'Color & edge replacement' },
+  { step: 3, id: 'background', title: 'AI Background', desc: 'Neural boundary isolation' },
   { step: 4, id: 'retouch', title: 'Retouch & Outfits', desc: 'Blemish heal & formal suit' },
   { step: 5, id: 'print', title: 'Print Sheet', desc: '300 DPI layout & download' },
 ] as const;
@@ -53,8 +56,10 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
   const [showRuleOfThirds, setShowRuleOfThirds] = useState(false);
   const [aiStrength, setAiStrength] = useState(70);
   const [isApplyingAI, setIsApplyingAI] = useState(false);
-  const [customBgColor, setCustomBgColor] = useState('#A5C9EB');
-  const [isSamplingBgColor, setIsSamplingBgColor] = useState(false);
+  const [customBgColor, setCustomBgColor] = useState(project.background.color || '#A5C9EB');
+  const [isRemovingBg, setIsRemovingBg] = useState(false);
+  const [bgProgress, setBgProgress] = useState<{ text: string; pct: number } | null>(null);
+  const cutoutImageRef = useRef<HTMLImageElement | null>(null);
   const [brushMode, setBrushMode] = useState<'smooth' | 'heal' | 'brighten' | 'eraser'>('smooth');
   const [brushRadius, setBrushRadius] = useState(20);
   const [brushStrength, setBrushStrength] = useState(50);
@@ -83,6 +88,14 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
   const [exportFormat, setExportFormat] = useState<'png' | 'jpeg'>('png');
   const [jpegQuality, setJpegQuality] = useState(95);
 
+  // Multi-Person State
+  const [isAddPersonModalOpen, setIsAddPersonModalOpen] = useState(false);
+  const [newPersonName, setNewPersonName] = useState('');
+  const [editingPersonNameId, setEditingPersonNameId] = useState<string | null>(null);
+  const [editNameValue, setEditNameValue] = useState('');
+  const [personCanvasesMap, setPersonCanvasesMap] = useState<Record<string, HTMLCanvasElement>>({});
+  const newPersonFileInputRef = useRef<HTMLInputElement>(null);
+
   // Switch step and track visited
   const goToStep = (step: WizardStep) => {
     setCurrentStep(step);
@@ -103,6 +116,19 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     };
   }, [project.imageSrc]);
 
+  // Load neural cutout image whenever available
+  useEffect(() => {
+    if (project.background.cutoutDataUrl) {
+      loadImage(project.background.cutoutDataUrl).then(img => {
+        cutoutImageRef.current = img;
+        renderPipeline();
+      });
+    } else {
+      cutoutImageRef.current = null;
+      renderPipeline();
+    }
+  }, [project.background.cutoutDataUrl]);
+
   // Push to undo history
   const pushHistory = useCallback((newProj: StudioProject) => {
     const curIndex = historyIndexRef.current;
@@ -113,210 +139,20 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     historyIndexRef.current = newHistory.length - 1;
   }, []);
 
-  const handleUndo = useCallback(() => {
+  const handleUndo = () => {
     if (historyIndexRef.current > 0) {
       historyIndexRef.current -= 1;
       const prev = historyRef.current[historyIndexRef.current];
       onUpdateProject(() => prev);
     }
-  }, [onUpdateProject]);
+  };
 
-  const handleRedo = useCallback(() => {
+  const handleRedo = () => {
     if (historyIndexRef.current < historyRef.current.length - 1) {
       historyIndexRef.current += 1;
       const next = historyRef.current[historyIndexRef.current];
       onUpdateProject(() => next);
     }
-  }, [onUpdateProject]);
-
-  // Global Keyboard Shortcuts (Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z, Ctrl+P)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
-        return;
-      }
-
-      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-      const modifier = isMac ? e.metaKey : e.ctrlKey;
-
-      if (modifier && e.key.toLowerCase() === 'z') {
-        e.preventDefault();
-        if (e.shiftKey) {
-          handleRedo();
-        } else {
-          handleUndo();
-        }
-      } else if (modifier && e.key.toLowerCase() === 'y') {
-        e.preventDefault();
-        handleRedo();
-      } else if (modifier && e.key.toLowerCase() === 'p') {
-        e.preventDefault();
-        goToStep(5);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo]);
-
-  // Crop interactive dragging state
-  const cropDragRef = useRef<{
-    isDragging: boolean;
-    handle: 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w' | null;
-    startX: number;
-    startY: number;
-    startCrop: CropState;
-  }>({
-    isDragging: false,
-    handle: null,
-    startX: 0,
-    startY: 0,
-    startCrop: project.crop,
-  });
-
-  const handleCropPointerDown = (
-    e: React.PointerEvent,
-    handle: 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w'
-  ) => {
-    e.stopPropagation();
-    try {
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    } catch {
-      // ignore
-    }
-    cropDragRef.current = {
-      isDragging: true,
-      handle,
-      startX: e.clientX,
-      startY: e.clientY,
-      startCrop: { ...project.crop },
-    };
-  };
-
-  const handleCropPointerMove = (e: React.PointerEvent) => {
-    if (!cropDragRef.current.isDragging || !cropDragRef.current.handle) return;
-    const canvas = viewportCanvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-
-    const deltaXPct = ((e.clientX - cropDragRef.current.startX) / rect.width) * 100;
-    const deltaYPct = ((e.clientY - cropDragRef.current.startY) / rect.height) * 100;
-
-    const { handle, startCrop } = cropDragRef.current;
-    let newCrop = { ...startCrop };
-
-    if (handle === 'move') {
-      let nextX = startCrop.x + deltaXPct;
-      let nextY = startCrop.y + deltaYPct;
-      nextX = Math.max(0, Math.min(100 - startCrop.width, nextX));
-      nextY = Math.max(0, Math.min(100 - startCrop.height, nextY));
-      newCrop.x = Number(nextX.toFixed(2));
-      newCrop.y = Number(nextY.toFixed(2));
-    } else {
-      let x1 = startCrop.x;
-      let y1 = startCrop.y;
-      let x2 = startCrop.x + startCrop.width;
-      let y2 = startCrop.y + startCrop.height;
-
-      if (handle.includes('w')) x1 = Math.max(0, Math.min(x2 - 10, startCrop.x + deltaXPct));
-      if (handle.includes('e')) x2 = Math.min(100, Math.max(x1 + 10, startCrop.x + startCrop.width + deltaXPct));
-      if (handle.includes('n')) y1 = Math.max(0, Math.min(y2 - 10, startCrop.y + deltaYPct));
-      if (handle.includes('s')) y2 = Math.min(100, Math.max(y1 + 10, startCrop.y + startCrop.height + deltaYPct));
-
-      let width = x2 - x1;
-      let height = y2 - y1;
-
-      // Maintain aspect ratio if locked
-      if (newCrop.lockAspect) {
-        const canvasAspect = canvas.width / canvas.height;
-        const targetPhysicalAspect = newCrop.aspectRatio || (selectedPreset.widthMm / selectedPreset.heightMm);
-        const pctAspect = targetPhysicalAspect / canvasAspect;
-
-        if (handle === 'e' || handle === 'w') {
-          height = width / pctAspect;
-          if (y1 + height > 100) {
-            height = 100 - y1;
-            width = height * pctAspect;
-          }
-        } else {
-          width = height * pctAspect;
-          if (x1 + width > 100) {
-            width = 100 - x1;
-            height = width / pctAspect;
-          }
-        }
-      }
-
-      newCrop = {
-        ...newCrop,
-        x: Number(Math.max(0, x1).toFixed(2)),
-        y: Number(Math.max(0, y1).toFixed(2)),
-        width: Number(Math.max(10, Math.min(100 - x1, width)).toFixed(2)),
-        height: Number(Math.max(10, Math.min(100 - y1, height)).toFixed(2)),
-      };
-    }
-
-    onUpdateProject(prev => ({
-      ...prev,
-      crop: newCrop,
-    }));
-  };
-
-  const handleCropPointerUp = (e: React.PointerEvent) => {
-    if (cropDragRef.current.isDragging) {
-      cropDragRef.current.isDragging = false;
-      cropDragRef.current.handle = null;
-      try {
-        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-      } catch {
-        // ignore
-      }
-      pushHistory(project);
-    }
-  };
-
-  const handleAutoCenterCrop = () => {
-    const canvas = viewportCanvasRef.current;
-    const canvasAspect = canvas && canvas.height > 0 ? canvas.width / canvas.height : 1;
-    const targetPhysicalAspect = selectedPreset.widthMm / selectedPreset.heightMm;
-    const pctAspect = targetPhysicalAspect / canvasAspect;
-
-    let height = 75;
-    let width = height * pctAspect;
-    if (width > 85) {
-      width = 85;
-      height = width / pctAspect;
-    }
-    const x = Math.max(0, (100 - width) / 2);
-    const y = Math.max(0, (100 - height) / 2);
-
-    const newCrop: CropState = {
-      ...project.crop,
-      x: Number(x.toFixed(2)),
-      y: Number(y.toFixed(2)),
-      width: Number(width.toFixed(2)),
-      height: Number(height.toFixed(2)),
-      lockAspect: true,
-      aspectRatio: targetPhysicalAspect,
-    };
-
-    onUpdateProject(prev => ({ ...prev, crop: newCrop }));
-    pushHistory({ ...project, crop: newCrop });
-  };
-
-  const handleResetCropToFull = () => {
-    const newCrop: CropState = {
-      ...project.crop,
-      x: 0,
-      y: 0,
-      width: 100,
-      height: 100,
-      lockAspect: false,
-    };
-    onUpdateProject(prev => ({ ...prev, crop: newCrop }));
-    pushHistory({ ...project, crop: newCrop });
   };
 
   // Main rendering pipeline
@@ -342,10 +178,10 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
       }
     }
 
-    // 3. Background replacement
+    // 3. Background replacement using AI Neural Cutout
     let stageCanvas = baseCanvas;
-    if (project.background.isRemoved) {
-      stageCanvas = processBackgroundRemoval(baseCanvas, project.background);
+    if (project.background.isRemoved && cutoutImageRef.current) {
+      stageCanvas = processBackgroundRemoval(baseCanvas, project.background, cutoutImageRef.current);
     }
 
     // 4. Retouch strokes
@@ -468,62 +304,280 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     });
   };
 
-  // Background Studio toggles & One-Tap background remove
-  const handleOneTapRemoveBackground = (targetColor: string = '#FFFFFF') => {
-    setCustomBgColor(targetColor === 'transparent' ? '#FFFFFF' : targetColor);
+  // Multi-Person handlers
+  const handleSwitchPerson = (targetPersonId: string) => {
+    const currentPersonId = project.activePersonId || project.people?.[0]?.id;
+    if (currentPersonId === targetPersonId) return;
+
+    const targetPerson = project.people?.find(p => p.id === targetPersonId);
+    if (!targetPerson) return;
+
     onUpdateProject(prev => {
-      const isTrans = targetColor === 'transparent';
-      const updated: StudioProject = {
+      // Save current person state into people array
+      const updatedPeople = (prev.people || []).map(p => {
+        if (p.id === currentPersonId) {
+          return {
+            ...p,
+            imageSrc: prev.imageSrc,
+            naturalWidth: prev.naturalWidth,
+            naturalHeight: prev.naturalHeight,
+            adjustments: { ...prev.adjustments },
+            transformations: { ...prev.transformations },
+            crop: { ...prev.crop },
+            background: { ...prev.background },
+            retouchStrokes: [...prev.retouchStrokes],
+            outfit: prev.outfit ? { ...prev.outfit } : null,
+          };
+        }
+        return p;
+      });
+
+      return {
         ...prev,
-        background: {
-          ...prev.background,
-          isRemoved: true,
-          mode: isTrans ? 'transparent' : 'color',
-          color: isTrans ? 'transparent' : targetColor,
-          tolerance: prev.background.tolerance || 48,
-          feather: prev.background.feather || 6,
-        },
+        activePersonId: targetPerson.id,
+        imageSrc: targetPerson.imageSrc,
+        naturalWidth: targetPerson.naturalWidth,
+        naturalHeight: targetPerson.naturalHeight,
+        adjustments: { ...targetPerson.adjustments },
+        transformations: { ...targetPerson.transformations },
+        crop: { ...targetPerson.crop },
+        background: { ...targetPerson.background },
+        retouchStrokes: [...targetPerson.retouchStrokes],
+        outfit: targetPerson.outfit ? { ...targetPerson.outfit } : null,
+        people: updatedPeople,
       };
-      pushHistory(updated);
-      return updated;
     });
+
+    const preset = PASSPORT_PRESETS.find(p => p.id === targetPerson.crop.presetId) || PASSPORT_PRESETS[0];
+    setSelectedPreset(preset);
+    setCustomWidthMm(targetPerson.widthMm || preset.widthMm);
+    setCustomHeightMm(targetPerson.heightMm || preset.heightMm);
+    setCustomBgColor(targetPerson.background.color || '#A5C9EB');
   };
 
-  const handleRevertToOriginalBackground = () => {
-    onUpdateProject(prev => {
-      const updated: StudioProject = {
-        ...prev,
+  const handleAddPerson = (imageSrc: string, name?: string) => {
+    loadImage(imageSrc).then(img => {
+      const newPersonId = 'person_' + Date.now();
+      const defaultPreset = PASSPORT_PRESETS[0];
+      const newName = name || `Person ${(project.people?.length || 0) + 1}`;
+
+      const newPerson: StudioPerson = {
+        id: newPersonId,
+        name: newName,
+        imageSrc,
+        naturalWidth: img.naturalWidth,
+        naturalHeight: img.naturalHeight,
+        adjustments: {
+          brightness: 0,
+          contrast: 0,
+          saturation: 0,
+          exposure: 0,
+          highlights: 0,
+          shadows: 0,
+          temperature: 0,
+          tint: 0,
+          sharpness: 0,
+          blur: 0,
+          grayscale: 0,
+          sepia: 0,
+          vignette: 0,
+        },
+        transformations: {
+          fineRotation: 0,
+          rotation: 0,
+          flipH: false,
+          flipV: false,
+        },
+        crop: {
+          x: 5,
+          y: 5,
+          width: 90,
+          height: 90,
+          presetId: defaultPreset.id,
+          lockAspect: true,
+          aspectRatio: defaultPreset.ratio,
+        },
         background: {
-          ...prev.background,
           isRemoved: false,
           mode: 'original',
+          color: '#A5C9EB',
+          model: 'isnet-neural',
         },
+        retouchStrokes: [],
+        outfit: null,
+        widthMm: defaultPreset.widthMm,
+        heightMm: defaultPreset.heightMm,
       };
-      pushHistory(updated);
-      return updated;
+
+      const currentPersonId = project.activePersonId || project.people?.[0]?.id;
+
+      onUpdateProject(prev => {
+        const updatedPeople = (prev.people || []).map(p => {
+          if (p.id === currentPersonId) {
+            return {
+              ...p,
+              imageSrc: prev.imageSrc,
+              naturalWidth: prev.naturalWidth,
+              naturalHeight: prev.naturalHeight,
+              adjustments: { ...prev.adjustments },
+              transformations: { ...prev.transformations },
+              crop: { ...prev.crop },
+              background: { ...prev.background },
+              retouchStrokes: [...prev.retouchStrokes],
+              outfit: prev.outfit ? { ...prev.outfit } : null,
+            };
+          }
+          return p;
+        });
+
+        const allPeople = [...updatedPeople, newPerson];
+
+        return {
+          ...prev,
+          activePersonId: newPerson.id,
+          imageSrc: newPerson.imageSrc,
+          naturalWidth: newPerson.naturalWidth,
+          naturalHeight: newPerson.naturalHeight,
+          adjustments: { ...newPerson.adjustments },
+          transformations: { ...newPerson.transformations },
+          crop: { ...newPerson.crop },
+          background: { ...newPerson.background },
+          retouchStrokes: [],
+          outfit: null,
+          people: allPeople,
+        };
+      });
+
+      setSelectedPreset(defaultPreset);
+      setCustomWidthMm(defaultPreset.widthMm);
+      setCustomHeightMm(defaultPreset.heightMm);
+      setCustomBgColor('#A5C9EB');
+      setIsAddPersonModalOpen(false);
+      goToStep(1);
     });
   };
 
-  const handleToggleBackgroundRemoval = () => {
-    if (project.background.isRemoved) {
-      handleRevertToOriginalBackground();
-    } else {
-      handleOneTapRemoveBackground(project.background.color || '#FFFFFF');
+  const handleDeletePerson = (personId: string) => {
+    if ((project.people?.length || 0) <= 1) return;
+
+    onUpdateProject(prev => {
+      const remaining = (prev.people || []).filter(p => p.id !== personId);
+      const nextActive = remaining[0];
+      return {
+        ...prev,
+        people: remaining,
+        activePersonId: nextActive.id,
+        imageSrc: nextActive.imageSrc,
+        naturalWidth: nextActive.naturalWidth,
+        naturalHeight: nextActive.naturalHeight,
+        adjustments: { ...nextActive.adjustments },
+        transformations: { ...nextActive.transformations },
+        crop: { ...nextActive.crop },
+        background: { ...nextActive.background },
+        retouchStrokes: [...nextActive.retouchStrokes],
+        outfit: nextActive.outfit ? { ...nextActive.outfit } : null,
+      };
+    });
+  };
+
+  const handleRenamePerson = (personId: string, newName: string) => {
+    if (!newName.trim()) return;
+    onUpdateProject(prev => ({
+      ...prev,
+      people: (prev.people || []).map(p => p.id === personId ? { ...p, name: newName.trim() } : p),
+    }));
+  };
+
+  // Background Studio AI execution
+  const handleRunBackgroundRemoval = async (overrideColor?: string) => {
+    const img = sourceImageRef.current;
+    if (!img) return;
+
+    setIsRemovingBg(true);
+    setBgProgress({ text: 'Initializing IS-Net AI neural model...', pct: 15 });
+
+    try {
+      const baseCanvas = renderTransformedCanvas(img, project.transformations);
+      const cutoutDataUrl = await removeBackgroundWithAI(baseCanvas, (status, pct) => {
+        setBgProgress({ text: status, pct });
+      });
+
+      // Crucial: Load cutout into image ref first before state update
+      const loadedCutout = await loadImage(cutoutDataUrl);
+      cutoutImageRef.current = loadedCutout;
+
+      const chosenColor = overrideColor || project.background.color || customBgColor || '#A5C9EB';
+      const chosenMode = chosenColor === 'transparent' ? 'transparent' : 'color';
+
+      onUpdateProject(prev => {
+        const activeId = prev.activePersonId || prev.people?.[0]?.id;
+        const newBg: BackgroundSettings = {
+          ...prev.background,
+          isRemoved: true,
+          mode: chosenMode,
+          color: chosenColor,
+          model: 'isnet-neural',
+          cutoutDataUrl,
+        };
+
+        const updated: StudioProject = {
+          ...prev,
+          background: newBg,
+          people: prev.people?.map(p => p.id === activeId ? { ...p, background: newBg } : p),
+        };
+        pushHistory(updated);
+        return updated;
+      });
+    } catch (err) {
+      console.error('Failed to run AI background removal:', err);
+    } finally {
+      setIsRemovingBg(false);
+      setBgProgress(null);
     }
   };
 
-  const handleSelectBackgroundColor = (colorHex: string) => {
-    setCustomBgColor(colorHex === 'transparent' ? '#FFFFFF' : colorHex);
+  const handleToggleBackgroundRemoval = () => {
     onUpdateProject(prev => {
-      const isTrans = colorHex === 'transparent';
+      const newRemoved = !prev.background.isRemoved;
+      const activeId = prev.activePersonId || prev.people?.[0]?.id;
+      const newBg: BackgroundSettings = {
+        ...prev.background,
+        isRemoved: newRemoved,
+        mode: newRemoved ? (prev.background.mode === 'original' ? 'color' : prev.background.mode) : 'original',
+        color: prev.background.color || '#A5C9EB',
+      };
       const updated: StudioProject = {
         ...prev,
-        background: {
-          ...prev.background,
-          isRemoved: true,
-          mode: isTrans ? 'transparent' : 'color',
-          color: isTrans ? 'transparent' : colorHex,
-        },
+        background: newBg,
+        people: prev.people?.map(p => p.id === activeId ? { ...p, background: newBg } : p),
+      };
+      pushHistory(updated);
+      return updated;
+    });
+  };
+
+  const handleSelectBackgroundColor = async (colorHex: string) => {
+    setCustomBgColor(colorHex);
+
+    // If cutout hasn't been extracted yet, automatically run AI background extraction with chosen color
+    if (!project.background.cutoutDataUrl) {
+      await handleRunBackgroundRemoval(colorHex);
+      return;
+    }
+
+    const newMode: 'color' | 'original' | 'transparent' = colorHex === 'transparent' ? 'transparent' : 'color';
+    onUpdateProject(prev => {
+      const activeId = prev.activePersonId || prev.people?.[0]?.id;
+      const newBg: BackgroundSettings = {
+        ...prev.background,
+        isRemoved: true,
+        mode: newMode,
+        color: colorHex,
+      };
+      const updated: StudioProject = {
+        ...prev,
+        background: newBg,
+        people: prev.people?.map(p => p.id === activeId ? { ...p, background: newBg } : p),
       };
       pushHistory(updated);
       return updated;
@@ -559,10 +613,12 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     }, 100);
   };
 
-  // Pointer interaction handler for Retouching & Eyedropper Sampling
+  // Pointer interaction handler for Retouching Brush
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = viewportCanvasRef.current;
     if (!canvas) return;
+
+    if (currentStep !== 4) return;
 
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
@@ -570,31 +626,6 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 
     const x = (e.clientX - rect.left) * scaleX;
     const y = (e.clientY - rect.top) * scaleY;
-
-    // Eyedropper sampling in Background Studio
-    if (currentStep === 3 && isSamplingBgColor) {
-      const img = sourceImageRef.current;
-      if (img) {
-        const baseCanvas = renderTransformedCanvas(img, project.transformations);
-        const sampled = samplePixelColor(baseCanvas, x, y);
-        onUpdateProject(prev => {
-          const updated: StudioProject = {
-            ...prev,
-            background: {
-              ...prev.background,
-              isRemoved: true,
-              sampledBgColor: sampled,
-            },
-          };
-          pushHistory(updated);
-          return updated;
-        });
-      }
-      setIsSamplingBgColor(false);
-      return;
-    }
-
-    if (currentStep !== 4) return;
 
     setIsDrawing(true);
     const stroke: RetouchStroke = {
@@ -666,20 +697,59 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
   };
 
   const getPreparedCroppedCanvas = (): HTMLCanvasElement => {
+    if (!processedCanvasRef.current) {
+      const fallback = document.createElement('canvas');
+      fallback.width = 413;
+      fallback.height = 531;
+      return fallback;
+    }
     const targetW = mmToPixels(customWidthMm, 300);
     const targetH = mmToPixels(customHeightMm, 300);
-
-    if (sourceImageRef.current) {
-      return exportCroppedPassportPhoto(sourceImageRef.current, project, targetW, targetH);
-    }
-    if (processedCanvasRef.current) {
-      return getCroppedCanvas(processedCanvasRef.current, project.crop, targetW, targetH);
-    }
-    const fallback = document.createElement('canvas');
-    fallback.width = targetW;
-    fallback.height = targetH;
-    return fallback;
+    return getCroppedCanvas(processedCanvasRef.current, project.crop, targetW, targetH);
   };
+
+  // Pre-render cropped canvases for all people in project when entering Step 5
+  useEffect(() => {
+    if (currentStep === 5 && project.people && project.people.length > 0) {
+      project.people.forEach(async person => {
+        if (person.id === (project.activePersonId || project.people?.[0]?.id) && processedCanvasRef.current) {
+          const targetW = mmToPixels(customWidthMm, 300);
+          const targetH = mmToPixels(customHeightMm, 300);
+          const cropped = getCroppedCanvas(processedCanvasRef.current, project.crop, targetW, targetH);
+          setPersonCanvasesMap(prev => ({ ...prev, [person.id]: cropped }));
+        } else {
+          try {
+            const img = await loadImage(person.imageSrc);
+            let canvas = renderTransformedCanvas(img, person.transformations);
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            if (ctx) {
+              const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              applyAdjustmentsToImageData(imgData, person.adjustments);
+              ctx.putImageData(imgData, 0, 0);
+              if (person.adjustments.sharpness > 0) applySharpen(canvas, person.adjustments.sharpness);
+              if (person.adjustments.vignette > 0) applyVignette(canvas, person.adjustments.vignette);
+            }
+            if (person.background.isRemoved && person.background.cutoutDataUrl) {
+              const cutoutImg = await loadImage(person.background.cutoutDataUrl);
+              canvas = processBackgroundRemoval(canvas, person.background, cutoutImg);
+            }
+            if (person.retouchStrokes && person.retouchStrokes.length > 0) {
+              applyRetouchStrokes(canvas, person.retouchStrokes);
+            }
+            const preset = PASSPORT_PRESETS.find(p => p.id === person.crop.presetId) || PASSPORT_PRESETS[0];
+            const wMm = person.widthMm || preset.widthMm;
+            const hMm = person.heightMm || preset.heightMm;
+            const targetW = mmToPixels(wMm, 300);
+            const targetH = mmToPixels(hMm, 300);
+            const cropped = getCroppedCanvas(canvas, person.crop, targetW, targetH);
+            setPersonCanvasesMap(prev => ({ ...prev, [person.id]: cropped }));
+          } catch (err) {
+            console.warn('Could not pre-render canvas for person:', person.name, err);
+          }
+        }
+      });
+    }
+  }, [currentStep, project.people, project.activePersonId, customWidthMm, customHeightMm]);
 
   // Step 5: Full-screen Print Sheet Workspace
   if (currentStep === 5) {
@@ -693,6 +763,30 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
           onUpdateProject(prev => ({ ...prev, printSheet: cfg }));
         }}
         onBackToEditor={() => goToStep(1)}
+        sheetPhotos={project.sheetPhotos || []}
+        onAddSheetPhoto={photo => {
+          onUpdateProject(prev => ({
+            ...prev,
+            sheetPhotos: [...(prev.sheetPhotos || []), photo],
+          }));
+        }}
+        onRemoveSheetPhoto={photoId => {
+          onUpdateProject(prev => ({
+            ...prev,
+            sheetPhotos: (prev.sheetPhotos || []).filter(p => p.id !== photoId),
+            printSheet: {
+              ...prev.printSheet,
+              items: prev.printSheet.items.filter(i => i.photoId !== photoId),
+            },
+          }));
+        }}
+        people={project.people || []}
+        activePersonId={project.activePersonId}
+        personCanvasesMap={personCanvasesMap}
+        onSelectPersonToEdit={personId => {
+          handleSwitchPerson(personId);
+          goToStep(1);
+        }}
       />
     );
   }
@@ -737,58 +831,27 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
           })}
         </div>
 
-        {/* Right Stepper Actions: Undo (Ctrl+Z), Redo (Ctrl+Y), Print (Ctrl+P), Compare */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          <div className="flex items-center gap-1 bg-slate-900/90 border border-slate-800 p-0.5 rounded-xl">
+        {/* Right Stepper Actions: Undo, Redo, Compare */}
+        <div className="flex items-center gap-2 shrink-0">
+
+          <div className="flex items-center gap-1">
             <button
               onClick={handleUndo}
               disabled={historyIndexRef.current <= 0}
-              className="flex items-center gap-1 px-2 py-1 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-30 transition-colors cursor-pointer text-xs"
-              title="Undo (Ctrl+Z / ⌘Z)"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-30 transition-colors cursor-pointer"
+              title="Undo"
             >
-              <Undo2 className="w-3.5 h-3.5 text-cyan-400" />
-              <span className="hidden xl:inline text-[10px] font-mono text-slate-400">Ctrl+Z</span>
+              <Undo2 className="w-4 h-4" />
             </button>
             <button
               onClick={handleRedo}
               disabled={historyIndexRef.current >= historyRef.current.length - 1}
-              className="flex items-center gap-1 px-2 py-1 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-30 transition-colors cursor-pointer text-xs"
-              title="Redo (Ctrl+Y / ⌘Y)"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-30 transition-colors cursor-pointer"
+              title="Redo"
             >
-              <Redo2 className="w-3.5 h-3.5 text-cyan-400" />
-              <span className="hidden xl:inline text-[10px] font-mono text-slate-400">Ctrl+Y</span>
+              <Redo2 className="w-4 h-4" />
             </button>
           </div>
-
-          {/* One-Tap Remove Background Button */}
-          <button
-            onClick={() => {
-              handleOneTapRemoveBackground('#FFFFFF');
-              goToStep(3);
-            }}
-            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer shadow-sm ${
-              project.background.isRemoved && project.background.color === '#FFFFFF'
-                ? 'bg-emerald-950/60 border border-emerald-500/50 text-emerald-300'
-                : 'bg-cyan-300 hover:bg-cyan-200 text-[#0B1020] font-bold active:scale-95 shadow-cyan-950/50'
-            }`}
-            title="One-Tap Remove Background: Removes background and sets to white"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">
-              {project.background.isRemoved ? 'White BG Active' : 'Remove BG (White)'}
-            </span>
-            <span className="sm:hidden">Remove BG</span>
-          </button>
-
-          <button
-            onClick={() => goToStep(5)}
-            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-800 hover:border-cyan-400 text-slate-200 hover:text-cyan-300 transition-colors cursor-pointer"
-            title="Quick Print Sheet (Ctrl+P / ⌘P)"
-          >
-            <Printer className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="hidden md:inline">Print</span>
-            <span className="text-[10px] font-mono text-slate-400 bg-slate-800 px-1 rounded">Ctrl+P</span>
-          </button>
 
           <button
             onMouseDown={() => setShowOriginal(true)}
@@ -803,6 +866,120 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
             {showOriginal ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
             <span className="hidden sm:inline">Compare</span>
           </button>
+        </div>
+      </div>
+
+      {/* MULTI-PERSON STUDIO BAR */}
+      <div className="bg-slate-900/90 border-b border-slate-800 px-4 py-2 flex items-center justify-between gap-3 overflow-x-auto scrollbar-none shrink-0">
+        <div className="flex items-center gap-2 min-w-max">
+          <div className="flex items-center gap-1.5 text-xs font-bold text-slate-400 uppercase tracking-wider pr-1">
+            <Users className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden sm:inline">People in Project:</span>
+          </div>
+
+          {(project.people || []).map((person, idx) => {
+            const isActive = (project.activePersonId || project.people?.[0]?.id) === person.id;
+            const isEditingName = editingPersonNameId === person.id;
+
+            return (
+              <div
+                key={person.id}
+                onClick={() => !isEditingName && handleSwitchPerson(person.id)}
+                className={`group flex items-center gap-2 px-3 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                  isActive
+                    ? 'bg-cyan-950/50 border-cyan-400 text-white shadow-sm ring-1 ring-cyan-400/30'
+                    : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                }`}
+              >
+                {/* Person Mini Avatar */}
+                <div className="w-5 h-5 rounded-full overflow-hidden border border-slate-700 shrink-0 bg-slate-800">
+                  <img src={person.imageSrc} alt={person.name} className="w-full h-full object-cover" />
+                </div>
+
+                {/* Name / Rename Input */}
+                {isEditingName ? (
+                  <input
+                    type="text"
+                    value={editNameValue}
+                    autoFocus
+                    onChange={e => setEditNameValue(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        handleRenamePerson(person.id, editNameValue);
+                        setEditingPersonNameId(null);
+                      } else if (e.key === 'Escape') {
+                        setEditingPersonNameId(null);
+                      }
+                    }}
+                    onBlur={() => {
+                      handleRenamePerson(person.id, editNameValue);
+                      setEditingPersonNameId(null);
+                    }}
+                    onClick={e => e.stopPropagation()}
+                    className="w-24 px-1.5 py-0.5 bg-slate-950 border border-cyan-400 text-xs text-white rounded outline-none font-semibold"
+                  />
+                ) : (
+                  <span className="text-xs font-semibold whitespace-nowrap">
+                    {person.name || `Person ${idx + 1}`}
+                  </span>
+                )}
+
+                {/* Edit Pencil */}
+                {!isEditingName && (
+                  <button
+                    type="button"
+                    onClick={e => {
+                      e.stopPropagation();
+                      setEditingPersonNameId(person.id);
+                      setEditNameValue(person.name || `Person ${idx + 1}`);
+                    }}
+                    className="p-0.5 text-slate-500 hover:text-cyan-300 rounded opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                    title="Rename this person"
+                  >
+                    <Pencil className="w-3 h-3" />
+                  </button>
+                )}
+
+                {/* Delete button if more than 1 person */}
+                {(project.people?.length || 0) > 1 && (
+                  <button
+                    type="button"
+                    onClick={e => {
+                      e.stopPropagation();
+                      handleDeletePerson(person.id);
+                    }}
+                    className="p-0.5 text-slate-500 hover:text-rose-400 rounded opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                    title="Delete person"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Add Person Button */}
+          <button
+            type="button"
+            onClick={() => {
+              setNewPersonName(`Person ${(project.people?.length || 0) + 1}`);
+              setIsAddPersonModalOpen(true);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-dashed border-cyan-400/50 hover:border-cyan-400 bg-cyan-950/20 hover:bg-cyan-950/40 text-cyan-300 hover:text-white text-xs font-semibold transition-all cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>+ Add Person</span>
+          </button>
+        </div>
+
+        {/* Info label on current person */}
+        <div className="hidden lg:flex items-center gap-2 text-[11px] text-slate-400 shrink-0 font-mono">
+          <span>Active Person:</span>
+          <span className="text-cyan-300 font-semibold">
+            {project.people?.find(p => p.id === (project.activePersonId || project.people?.[0]?.id))?.name || 'Person 1'}
+          </span>
+          <span className="text-slate-600">•</span>
+          <span>{selectedPreset.name}</span>
         </div>
       </div>
 
@@ -837,14 +1014,14 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
                   </p>
                 </div>
 
-                <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
                   {PASSPORT_PRESETS.map(preset => (
                     <button
                       key={preset.id}
                       onClick={() => handleSelectPreset(preset)}
                       className={`w-full text-left p-2.5 rounded-xl border transition-all cursor-pointer ${
                         selectedPreset.id === preset.id
-                          ? 'border-cyan-400 bg-cyan-950/30 text-white shadow-sm shadow-cyan-950/40'
+                          ? 'border-cyan-400 bg-cyan-950/30 text-white'
                           : 'border-slate-800 bg-slate-800/40 hover:border-slate-700'
                       }`}
                     >
@@ -857,66 +1034,6 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
                       <p className="text-[10px] text-slate-400 mt-0.5 truncate">{preset.description}</p>
                     </button>
                   ))}
-                </div>
-
-                {/* Manual Crop & Face Matching Box Controls */}
-                <div className="pt-2 border-t border-slate-800 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-white text-xs flex items-center gap-1.5">
-                      <Crop className="w-3.5 h-3.5 text-cyan-400" />
-                      <span>Manual Crop &amp; Face Fit</span>
-                    </span>
-                    <button
-                      onClick={() => {
-                        const newLock = !project.crop.lockAspect;
-                        onUpdateProject(prev => ({
-                          ...prev,
-                          crop: { ...prev.crop, lockAspect: newLock },
-                        }));
-                      }}
-                      className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium border cursor-pointer transition-colors ${
-                        project.crop.lockAspect
-                          ? 'bg-cyan-950/40 border-cyan-500/50 text-cyan-300'
-                          : 'bg-slate-800 border-slate-700 text-slate-400'
-                      }`}
-                      title="Lock aspect ratio to selected country standard"
-                    >
-                      {project.crop.lockAspect ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
-                      <span>{project.crop.lockAspect ? 'Ratio Locked' : 'Free Aspect'}</span>
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={handleAutoCenterCrop}
-                      className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-cyan-400 rounded-lg text-slate-200 transition-all cursor-pointer text-[11px] font-semibold"
-                    >
-                      <Compass className="w-3.5 h-3.5 text-cyan-400" />
-                      <span>Auto-Center Face</span>
-                    </button>
-                    <button
-                      onClick={handleResetCropToFull}
-                      className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-300 transition-colors cursor-pointer text-[11px]"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>Full Image</span>
-                    </button>
-                  </div>
-
-                  <div className="p-2.5 bg-cyan-950/20 border border-cyan-500/20 rounded-lg text-[11px] text-cyan-200/90 leading-relaxed">
-                    💡 <span className="font-semibold text-cyan-300">Face Matching:</span> Drag the cyan crop box over the face. Align eyes with the solid <span className="font-semibold text-cyan-300">Eye Level</span> line and chin with the <span className="font-semibold text-cyan-300">Chin</span> line.
-                  </div>
-
-                  <button
-                    onClick={() => {
-                      handleOneTapRemoveBackground('#FFFFFF');
-                      goToStep(3);
-                    }}
-                    className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-cyan-300 hover:bg-cyan-200 text-[#0B1020] rounded-xl transition-all cursor-pointer text-xs font-bold shadow-md shadow-cyan-950/40 active:scale-95"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>One-Tap White Background &amp; Colors →</span>
-                  </button>
                 </div>
 
                 {/* Straighten & Rotate controls */}
@@ -1058,241 +1175,186 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
               </div>
             )}
 
-            {/* STEP 3: BACKGROUND STUDIO & CUSTOM COLOR */}
+            {/* STEP 3: STATE-OF-THE-ART AI NEURAL BACKGROUND REMOVER */}
             {currentStep === 3 && (
               <div className="space-y-4">
                 <div className="space-y-1">
-                  <h3 className="font-semibold text-white text-sm">3. Background Replacement &amp; Color Studio</h3>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-cyan-950 border border-cyan-500/40 text-cyan-300">
+                      Highest-End Neural Model
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono">IS-Net Matting</span>
+                  </div>
+                  <h3 className="font-semibold text-white text-sm">3. AI Neural Background Removal &amp; Backdrop</h3>
                   <p className="text-[11px] text-slate-400">
-                    Remove background with one tap, keep solid white, or pick any official country or custom color.
+                    Deep-learning salient object segmentation isolates subjects cleanly from any kind of background (indoor, outdoor, complex, shadows) with 100% subject preservation.
                   </p>
                 </div>
 
-                {/* ONE-TAP BACKGROUND REMOVER HERO CARD */}
-                <div className="p-4 bg-gradient-to-br from-cyan-950/40 via-slate-900/90 to-slate-900 border border-cyan-500/40 rounded-2xl shadow-lg space-y-3">
+                {/* AI Model Trigger Card */}
+                <div className="p-4 bg-gradient-to-b from-slate-900 to-cyan-950/20 border border-cyan-500/30 rounded-xl space-y-3 shadow-lg">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-8 h-8 rounded-xl bg-cyan-400/20 border border-cyan-400/40 flex items-center justify-center text-cyan-300 shrink-0">
-                        <Sparkles className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-400 block">
-                          Instant One-Tap Tool
-                        </span>
-                        <h4 className="text-xs font-bold text-white">One-Tap Remove Background</h4>
-                      </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2.5 h-2.5 rounded-full ${project.background.isRemoved ? 'bg-emerald-400 ring-2 ring-emerald-400/30' : 'bg-cyan-400 animate-pulse'}`}></span>
+                      <span className="text-xs font-bold text-white">
+                        {project.background.isRemoved ? 'Subject Isolated (Zero Distortion)' : 'AI Salient Matting Model'}
+                      </span>
                     </div>
+                    {project.background.isRemoved && (
+                      <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-500/30">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> High-End Cutout Ready
+                      </span>
+                    )}
                   </div>
 
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Automatically segments the person and replaces the entire background with clean, professional solid white.
+                    Preserves natural hair strands, facial features, clothes contours, and skin tones with zero pixel alteration.
                   </p>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                    <button
-                      onClick={() => handleOneTapRemoveBackground('#FFFFFF')}
-                      className={`w-full py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md ${
-                        project.background.isRemoved && project.background.color === '#FFFFFF' && project.background.mode !== 'transparent'
-                          ? 'bg-emerald-400 text-slate-950 ring-2 ring-emerald-300 shadow-emerald-950/50'
-                          : 'bg-cyan-300 hover:bg-cyan-200 text-[#0B1020] active:scale-95 shadow-cyan-950/40'
-                      }`}
-                    >
-                      <Sparkles className="w-4 h-4" />
-                      <span>
-                        {project.background.isRemoved && project.background.color === '#FFFFFF' && project.background.mode !== 'transparent'
-                          ? 'White Background Applied ✓'
-                          : 'Remove BG (White BG)'}
-                      </span>
-                    </button>
-
-                    {project.background.isRemoved ? (
-                      <button
-                        onClick={handleRevertToOriginalBackground}
-                        className="w-full py-2.5 px-3 rounded-xl font-medium text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-all cursor-pointer flex items-center justify-center gap-1.5"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
-                        <span>Restore Original BG</span>
-                      </button>
+                  <button
+                    onClick={() => handleRunBackgroundRemoval()}
+                    disabled={isRemovingBg}
+                    className="w-full py-2.5 px-4 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-bold rounded-lg text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md disabled:opacity-50 active:scale-98"
+                  >
+                    {isRemovingBg ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
+                        <span>Processing AI Salient Matting…</span>
+                      </>
                     ) : (
-                      <button
-                        onClick={() => handleOneTapRemoveBackground('transparent')}
-                        className="w-full py-2.5 px-3 rounded-xl font-medium text-xs bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-all cursor-pointer flex items-center justify-center gap-1.5"
-                      >
-                        <span>Transparent Cutout</span>
-                      </button>
+                      <>
+                        <Sparkles className="w-4 h-4" />
+                        <span>{project.background.cutoutDataUrl ? 'Re-run AI Background Extraction' : 'Remove Background with AI Model'}</span>
+                      </>
                     )}
-                  </div>
-                </div>
+                  </button>
 
-                {/* BACKGROUND COLOR PICKER & SWATCHES */}
-                <div className="space-y-3 pt-1">
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-white text-xs uppercase tracking-wider flex items-center gap-1.5">
-                      <span>Change Background Color</span>
-                    </span>
-                    {project.background.isRemoved && (
-                      <span className="text-[10px] text-cyan-300 font-mono font-medium">
-                        Active: {project.background.mode === 'transparent' ? 'Transparent PNG' : project.background.color}
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Preset Colors Grid */}
-                  <div className="grid grid-cols-2 gap-2">
-                    {BACKGROUND_PRESET_COLORS.map(item => {
-                      const isSelected =
-                        project.background.isRemoved &&
-                        ((item.hex === 'transparent' && project.background.mode === 'transparent') ||
-                          (project.background.mode !== 'transparent' && project.background.color?.toUpperCase() === item.hex.toUpperCase()));
-
-                      return (
-                        <button
-                          key={item.id}
-                          onClick={() => handleSelectBackgroundColor(item.hex)}
-                          className={`flex items-center gap-2 p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                            isSelected
-                              ? 'border-cyan-400 bg-cyan-950/30 text-white ring-1 ring-cyan-400 shadow-sm'
-                              : 'border-slate-800 bg-slate-800/40 text-slate-300 hover:border-slate-700'
-                          }`}
-                        >
-                          <div
-                            className="w-6 h-6 rounded-lg border border-slate-600 shrink-0 shadow-sm flex items-center justify-center"
-                            style={{
-                              backgroundColor: item.hex === 'transparent' ? '#1e293b' : item.hex,
-                            }}
-                          >
-                            {isSelected && (
-                              <Check
-                                className={`w-3.5 h-3.5 ${
-                                  item.hex === '#FFFFFF' || item.hex === '#F8FAFC' || item.hex === '#FDFBF7' || item.hex === '#BAE6FD'
-                                    ? 'text-slate-900'
-                                    : 'text-white'
-                                }`}
-                                strokeWidth={3}
-                              />
-                            )}
-                          </div>
-                          <div className="overflow-hidden">
-                            <span className="font-semibold block truncate text-xs">{item.label}</span>
-                            <span className="text-[10px] text-slate-400 block truncate">{item.desc}</span>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {/* Custom Hex & Native Color Picker */}
-                  <div className="p-3 bg-slate-800/60 border border-slate-700 rounded-xl space-y-2">
-                    <span className="text-[11px] font-semibold text-cyan-300 uppercase tracking-wider block">
-                      Custom Color Picker
-                    </span>
-                    <div className="flex items-center gap-3">
-                      <input
-                        type="color"
-                        value={customBgColor.startsWith('#') ? customBgColor : '#FFFFFF'}
-                        onChange={e => handleSelectBackgroundColor(e.target.value)}
-                        className="w-10 h-10 rounded-lg border border-slate-600 bg-transparent cursor-pointer shrink-0"
-                        title="Pick custom background color"
-                      />
-                      <div className="flex-1">
-                        <input
-                          type="text"
-                          value={customBgColor}
-                          onChange={e => handleSelectBackgroundColor(e.target.value)}
-                          placeholder="#FFFFFF"
-                          className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 font-mono text-white text-xs uppercase"
+                  {/* Real-time progress bar */}
+                  {isRemovingBg && bgProgress && (
+                    <div className="space-y-1.5 pt-1">
+                      <div className="flex items-center justify-between text-[11px] text-cyan-300 font-mono">
+                        <span className="truncate">{bgProgress.text}</span>
+                        <span className="font-bold">{bgProgress.pct}%</span>
+                      </div>
+                      <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-cyan-400 transition-all duration-300"
+                          style={{ width: `${bgProgress.pct}%` }}
                         />
                       </div>
-                      <button
-                        onClick={() => handleSelectBackgroundColor(customBgColor || '#FFFFFF')}
-                        className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-semibold cursor-pointer"
-                      >
-                        Apply
-                      </button>
                     </div>
-                  </div>
-
-                  {/* Eyedropper Color Picker Tool */}
-                  <div className="p-3 bg-slate-800/60 border border-slate-700 rounded-xl space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-semibold text-cyan-300 uppercase tracking-wider block">
-                        Eyedropper Sampler
-                      </span>
-                      {project.background.sampledBgColor && (
-                        <button
-                          onClick={() => {
-                            onUpdateProject(prev => ({
-                              ...prev,
-                              background: { ...prev.background, sampledBgColor: undefined },
-                            }));
-                          }}
-                          className="text-[10px] text-slate-400 hover:text-cyan-300 hover:underline cursor-pointer"
-                        >
-                          Reset Sampler
-                        </button>
-                      )}
-                    </div>
-
-                    <button
-                      onClick={() => setIsSamplingBgColor(prev => !prev)}
-                      className={`w-full py-2 px-3 rounded-lg border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                        isSamplingBgColor
-                          ? 'border-cyan-400 bg-cyan-950/40 text-cyan-300 ring-2 ring-cyan-400/50 animate-pulse'
-                          : 'border-slate-700 bg-slate-900/80 text-slate-200 hover:border-slate-600'
-                      }`}
-                    >
-                      <Pipette className="w-3.5 h-3.5 text-cyan-400" />
-                      <span>{isSamplingBgColor ? 'Click anywhere on photo to sample…' : 'Sample Color from Photo'}</span>
-                    </button>
-                  </div>
+                  )}
                 </div>
 
-                    {/* Edge Tolerance & Feather Sliders */}
-                    <div className="pt-2 space-y-3 border-t border-slate-800">
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-400">Edge Tolerance:</span>
-                        <span className="font-mono text-cyan-300 font-semibold">
-                          {project.background.tolerance || 48}
-                        </span>
-                      </div>
-                      <input
-                        type="range"
-                        min="15"
-                        max="95"
-                        value={project.background.tolerance || 48}
-                        onChange={e => {
-                          const val = Number(e.target.value);
-                          onUpdateProject(prev => ({
-                            ...prev,
-                            background: { ...prev.background, tolerance: val },
-                          }));
-                        }}
-                        className="w-full accent-cyan-400 cursor-pointer"
-                      />
+                {/* Backdrop Color Options (when background is removed or cutout ready) */}
+                {project.background.isRemoved && (
+                  <div className="space-y-3.5 pt-1 animate-in fade-in duration-200">
+                    {/* Mode Selector: Solid Color vs Transparent */}
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => handleSelectBackgroundColor(customBgColor || '#A5C9EB')}
+                        className={`p-2.5 rounded-lg border text-center font-semibold text-xs transition-all cursor-pointer ${
+                          project.background.mode !== 'transparent'
+                            ? 'border-cyan-400 bg-cyan-950/30 text-white shadow-sm'
+                            : 'border-slate-800 bg-slate-900/60 text-slate-400 hover:border-slate-700'
+                        }`}
+                      >
+                        Solid Passport Backdrop
+                      </button>
+                      <button
+                        onClick={() => handleSelectBackgroundColor('transparent')}
+                        className={`p-2.5 rounded-lg border text-center font-semibold text-xs transition-all cursor-pointer ${
+                          project.background.mode === 'transparent'
+                            ? 'border-cyan-400 bg-cyan-950/30 text-white shadow-sm'
+                            : 'border-slate-800 bg-slate-900/60 text-slate-400 hover:border-slate-700'
+                        }`}
+                      >
+                        Transparent Cutout (PNG)
+                      </button>
+                    </div>
 
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-400">Feather (Soft Edge):</span>
-                        <span className="font-mono text-cyan-300 font-semibold">
-                          {project.background.feather || 6}px
+                    {/* Official Presets */}
+                    {project.background.mode !== 'transparent' && (
+                      <div className="space-y-2">
+                        <span className="font-semibold text-white block text-[11px] uppercase tracking-wider">
+                          Official Passport Standard Colors
                         </span>
+                        <div className="grid grid-cols-2 gap-2">
+                          {BACKGROUND_PRESET_COLORS.map(item => (
+                            <button
+                              key={item.id}
+                              onClick={() => handleSelectBackgroundColor(item.hex)}
+                              className={`flex items-center gap-2 p-2 rounded-lg border text-left transition-all cursor-pointer ${
+                                (item.hex === 'transparent' && project.background.mode === 'transparent') ||
+                                (project.background.mode !== 'transparent' && project.background.color === item.hex)
+                                  ? 'border-cyan-400 bg-cyan-950/30 text-white'
+                                  : 'border-slate-800 bg-slate-900/80 text-slate-300 hover:border-slate-700'
+                              }`}
+                            >
+                              <div
+                                className="w-5 h-5 rounded-md border border-slate-600 shrink-0"
+                                style={{
+                                  backgroundColor: item.hex === 'transparent' ? '#334155' : item.hex,
+                                }}
+                              />
+                              <div className="overflow-hidden">
+                                <span className="font-semibold block truncate text-xs">{item.label}</span>
+                                <span className="text-[10px] text-slate-400 block truncate">{item.desc}</span>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Custom Color Input */}
+                        <div className="p-3 bg-slate-900/80 border border-slate-800 rounded-xl space-y-2">
+                          <span className="text-[11px] font-semibold text-cyan-300 uppercase tracking-wider block">
+                            Custom Backdrop Color
+                          </span>
+                          <div className="flex items-center gap-3">
+                            <input
+                              type="color"
+                              value={customBgColor}
+                              onChange={e => handleSelectBackgroundColor(e.target.value)}
+                              className="w-9 h-9 rounded-lg border border-slate-600 bg-transparent cursor-pointer shrink-0"
+                              title="Pick custom color"
+                            />
+                            <div className="flex-1">
+                              <input
+                                type="text"
+                                value={customBgColor}
+                                onChange={e => handleSelectBackgroundColor(e.target.value)}
+                                placeholder="#A5C9EB"
+                                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-mono text-white text-xs uppercase"
+                              />
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                      <input
-                        type="range"
-                        min="2"
-                        max="20"
-                        value={project.background.feather || 6}
-                        onChange={e => {
-                          const val = Number(e.target.value);
+                    )}
+
+                    <div className="pt-2 border-t border-slate-800 flex items-center justify-between">
+                      <button
+                        onClick={() => {
                           onUpdateProject(prev => ({
                             ...prev,
-                            background: { ...prev.background, feather: val },
+                            background: { ...prev.background, isRemoved: false, mode: 'original' },
                           }));
                         }}
-                        className="w-full accent-cyan-400 cursor-pointer"
-                      />
+                        className="text-xs text-slate-400 hover:text-cyan-300 hover:underline cursor-pointer"
+                      >
+                        Revert to original background
+                      </button>
+                      <button
+                        onClick={() => goToStep(4)}
+                        className="text-xs font-bold text-cyan-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer"
+                      >
+                        Next: Retouch &amp; Outfits →
+                      </button>
                     </div>
                   </div>
                 )}
+              </div>
+            )}
 
             {/* STEP 4: RETOUCH BRUSH & FORMAL OUTFITS */}
             {currentStep === 4 && (
@@ -1465,20 +1527,6 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
             </button>
           </div>
 
-          {/* Eyedropper Sampling Active Banner */}
-          {isSamplingBgColor && (
-            <div className="absolute top-2 left-2 z-20 flex items-center gap-2 bg-cyan-950/90 border border-cyan-400 text-cyan-200 px-3 py-1.5 rounded-lg text-xs font-semibold backdrop-blur-md shadow-lg animate-pulse">
-              <Pipette className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Click anywhere on background to sample color</span>
-              <button
-                onClick={() => setIsSamplingBgColor(false)}
-                className="ml-1 text-[10px] bg-cyan-900/60 hover:bg-cyan-800 px-1.5 py-0.5 rounded text-white cursor-pointer"
-              >
-                Cancel
-              </button>
-            </div>
-          )}
-
           {/* Main Photo Canvas */}
           <div
             style={{
@@ -1496,7 +1544,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
               onPointerMove={handleCanvasPointerMove}
               onPointerUp={handleCanvasPointerUp}
               className={`block max-h-[34vh] sm:max-h-[38vh] md:max-h-[75vh] max-w-[85vw] object-contain rounded-sm ${
-                currentStep === 4 || isSamplingBgColor ? 'cursor-crosshair' : 'cursor-default'
+                currentStep === 4 ? 'cursor-crosshair' : 'cursor-default'
               }`}
             />
 
@@ -1517,201 +1565,143 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
               />
             )}
 
-            {/* Interactive Crop Box Overlay for Manual Cropping & Face Alignment */}
-            {currentStep === 1 ? (
-              <div
-                className="absolute inset-0 select-none overflow-hidden"
-                onPointerMove={handleCropPointerMove}
-                onPointerUp={handleCropPointerUp}
-              >
-                {/* 4 Scrim Overlays around the crop box to dim the outside */}
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    height: `${project.crop.y}%`,
-                  }}
-                  className="bg-black/60 pointer-events-none"
-                />
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: `${project.crop.y + project.crop.height}%`,
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                  }}
-                  className="bg-black/60 pointer-events-none"
-                />
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: `${project.crop.y}%`,
-                    left: 0,
-                    width: `${project.crop.x}%`,
-                    height: `${project.crop.height}%`,
-                  }}
-                  className="bg-black/60 pointer-events-none"
-                />
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: `${project.crop.y}%`,
-                    left: `${project.crop.x + project.crop.width}%`,
-                    right: 0,
-                    height: `${project.crop.height}%`,
-                  }}
-                  className="bg-black/60 pointer-events-none"
-                />
-
-                {/* The Interactive Crop Box */}
-                <div
-                  style={{
-                    position: 'absolute',
-                    left: `${project.crop.x}%`,
-                    top: `${project.crop.y}%`,
-                    width: `${project.crop.width}%`,
-                    height: `${project.crop.height}%`,
-                  }}
-                  className="border-2 border-cyan-400 shadow-[0_0_0_1px_rgba(0,0,0,0.8),0_0_20px_rgba(34,211,238,0.25)] touch-none cursor-move"
-                  onPointerDown={e => handleCropPointerDown(e, 'move')}
-                >
-                  {/* Biometric Passport Face Alignment Guides INSIDE the crop box */}
-                  {showGuides && (
-                    <div className="absolute inset-0 pointer-events-none overflow-hidden">
-                      {/* Eye Level Guide line (42% from top of crop) */}
-                      <div
-                        style={{ top: '42%' }}
-                        className="absolute left-0 right-0 border-t border-cyan-400/90 flex items-center justify-end px-1.5 shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
-                      >
-                        <span className="text-[8px] sm:text-[9px] font-mono font-semibold text-cyan-200 bg-slate-950/90 px-1 py-0.5 rounded border border-cyan-500/40">
-                          Eye Level
-                        </span>
-                      </div>
-
-                      {/* Crown (Hair top) Guide line (14% from top of crop) */}
-                      <div
-                        style={{ top: '14%' }}
-                        className="absolute left-0 right-0 border-t border-dashed border-cyan-400/60 flex items-center justify-end px-1.5"
-                      >
-                        <span className="text-[8px] sm:text-[9px] font-mono text-cyan-300 bg-slate-950/80 px-1 py-0.2 rounded">
-                          Crown
-                        </span>
-                      </div>
-
-                      {/* Chin Guide line (78% from top of crop) */}
-                      <div
-                        style={{ top: '78%' }}
-                        className="absolute left-0 right-0 border-t border-dashed border-cyan-400/60 flex items-center justify-end px-1.5"
-                      >
-                        <span className="text-[8px] sm:text-[9px] font-mono text-cyan-300 bg-slate-950/80 px-1 py-0.2 rounded">
-                          Chin
-                        </span>
-                      </div>
-
-                      {/* Vertical Symmetry Center line */}
-                      <div className="absolute top-0 bottom-0 left-1/2 border-l border-cyan-400/40" />
-
-                      {/* Biometric Head Oval (70-80% height head silhouette) */}
-                      <div
-                        style={{
-                          left: '18%',
-                          right: '18%',
-                          top: '14%',
-                          bottom: '22%',
-                          borderRadius: '50% 50% 45% 45%',
-                          border: '1.5px dashed rgba(34, 211, 238, 0.75)',
-                          boxShadow: '0 0 10px rgba(34, 211, 238, 0.2)',
-                        }}
-                        className="absolute pointer-events-none"
-                      />
-
-                      {/* Current standard badge */}
-                      <div className="absolute top-1 left-1 bg-slate-950/90 text-cyan-300 text-[9px] font-mono font-semibold px-1.5 py-0.5 rounded border border-slate-700 pointer-events-none">
-                        {selectedPreset.name} ({customWidthMm}×{customHeightMm}mm)
-                      </div>
-                    </div>
-                  )}
-
-                  {/* 4 Corner Handles */}
-                  <div
-                    className="absolute -top-2 -left-2 w-4 h-4 bg-cyan-400 border border-slate-950 rounded-sm cursor-nwse-resize shadow-md hover:scale-125 transition-transform"
-                    onPointerDown={e => handleCropPointerDown(e, 'nw')}
-                    title="Resize crop box"
-                  />
-                  <div
-                    className="absolute -top-2 -right-2 w-4 h-4 bg-cyan-400 border border-slate-950 rounded-sm cursor-nesw-resize shadow-md hover:scale-125 transition-transform"
-                    onPointerDown={e => handleCropPointerDown(e, 'ne')}
-                    title="Resize crop box"
-                  />
-                  <div
-                    className="absolute -bottom-2 -left-2 w-4 h-4 bg-cyan-400 border border-slate-950 rounded-sm cursor-nesw-resize shadow-md hover:scale-125 transition-transform"
-                    onPointerDown={e => handleCropPointerDown(e, 'sw')}
-                    title="Resize crop box"
-                  />
-                  <div
-                    className="absolute -bottom-2 -right-2 w-4 h-4 bg-cyan-400 border border-slate-950 rounded-sm cursor-nwse-resize shadow-md hover:scale-125 transition-transform"
-                    onPointerDown={e => handleCropPointerDown(e, 'se')}
-                    title="Resize crop box"
-                  />
-
-                  {/* 4 Edge Handles */}
-                  <div
-                    className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-6 h-2 bg-cyan-400/90 border border-slate-950 rounded-sm cursor-ns-resize shadow"
-                    onPointerDown={e => handleCropPointerDown(e, 'n')}
-                  />
-                  <div
-                    className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-6 h-2 bg-cyan-400/90 border border-slate-950 rounded-sm cursor-ns-resize shadow"
-                    onPointerDown={e => handleCropPointerDown(e, 's')}
-                  />
-                  <div
-                    className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-2 h-6 bg-cyan-400/90 border border-slate-950 rounded-sm cursor-ew-resize shadow"
-                    onPointerDown={e => handleCropPointerDown(e, 'w')}
-                  />
-                  <div
-                    className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-2 h-6 bg-cyan-400/90 border border-slate-950 rounded-sm cursor-ew-resize shadow"
-                    onPointerDown={e => handleCropPointerDown(e, 'e')}
-                  />
-                </div>
-              </div>
-            ) : showGuides ? (
-              /* In other steps: subtle crop border and guidelines */
-              <div
-                style={{
-                  position: 'absolute',
-                  left: `${project.crop.x}%`,
-                  top: `${project.crop.y}%`,
-                  width: `${project.crop.width}%`,
-                  height: `${project.crop.height}%`,
-                }}
-                className="pointer-events-none border border-cyan-400/50 shadow-[0_0_0_9999px_rgba(0,0,0,0.5)]"
-              >
+            {/* Passport Biometric Overlay Guides */}
+            {showGuides && (
+              <div className="absolute inset-0 pointer-events-none border border-cyan-400/40">
                 <div
                   style={{ top: '42%' }}
-                  className="absolute left-0 right-0 border-t border-cyan-400/50 flex items-center justify-end px-1.5"
+                  className="absolute left-0 right-0 border-t border-cyan-400/60 flex items-center justify-end px-2"
                 >
-                  <span className="text-[8px] font-mono text-cyan-300 bg-slate-950/80 px-1 rounded">
+                  <span className="text-[9px] font-mono text-cyan-300 bg-slate-950/80 px-1 rounded">
                     Eye Level
                   </span>
                 </div>
                 <div
+                  style={{ top: '15%' }}
+                  className="absolute left-0 right-0 border-t border-dashed border-cyan-400/40 flex items-center justify-end px-2"
+                >
+                  <span className="text-[9px] font-mono text-cyan-300 bg-slate-950/80 px-1 rounded">
+                    Crown (Top)
+                  </span>
+                </div>
+                <div
+                  style={{ bottom: '15%' }}
+                  className="absolute left-0 right-0 border-t border-dashed border-cyan-400/40 flex items-center justify-end px-2"
+                >
+                  <span className="text-[9px] font-mono text-cyan-300 bg-slate-950/80 px-1 rounded">
+                    Chin
+                  </span>
+                </div>
+                <div
                   style={{
-                    left: '18%',
-                    right: '18%',
-                    top: '14%',
-                    bottom: '22%',
+                    left: '20%',
+                    right: '20%',
+                    top: '15%',
+                    bottom: '15%',
                     borderRadius: '50% 50% 45% 45%',
-                    border: '1px dashed rgba(34, 211, 238, 0.4)',
+                    border: '1.5px dashed rgba(103, 232, 249, 0.5)',
                   }}
                   className="absolute"
                 />
+                <div className="absolute top-0 bottom-0 left-1/2 border-l border-cyan-400/30" />
               </div>
-            ) : null}
+            )}
           </div>
         </div>
       </div>
+
+      {/* ADD PERSON MODAL */}
+      {isAddPersonModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Users className="w-4 h-4 text-cyan-400" />
+                <h3 className="font-bold text-white text-sm">Add Person to Studio</h3>
+              </div>
+              <button
+                onClick={() => setIsAddPersonModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-white rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-300">Person Label / Name</label>
+              <input
+                type="text"
+                value={newPersonName}
+                onChange={e => setNewPersonName(e.target.value)}
+                placeholder="e.g. Mom, Dad, Child, Jane"
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-xs focus:border-cyan-400 outline-none"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-slate-300 block">Select Photo</label>
+
+              {/* Upload file */}
+              <input
+                ref={newPersonFileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={e => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    const reader = new FileReader();
+                    reader.onload = ev => {
+                      const dataUrl = ev.target?.result as string;
+                      if (dataUrl) {
+                        handleAddPerson(dataUrl, newPersonName);
+                      }
+                    };
+                    reader.readAsDataURL(file);
+                  }
+                }}
+              />
+
+              <button
+                type="button"
+                onClick={() => newPersonFileInputRef.current?.click()}
+                className="w-full p-3 bg-cyan-950/30 hover:bg-cyan-950/60 border border-cyan-500/40 rounded-xl flex items-center justify-center gap-2 text-cyan-300 hover:text-white text-xs font-bold transition-colors cursor-pointer"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Upload Photo from Device</span>
+              </button>
+
+              <div className="text-center text-[10px] uppercase font-mono text-slate-500 py-0.5">— OR CHOOSE SAMPLE PORTRAIT —</div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleAddPerson(sampleManImg, newPersonName || 'Man Portrait')}
+                  className="p-2 bg-slate-950 border border-slate-800 hover:border-cyan-400 rounded-xl flex items-center gap-2 text-left transition-colors cursor-pointer group"
+                >
+                  <img src={sampleManImg} alt="Sample Man" className="w-9 h-9 rounded-lg object-cover" />
+                  <div>
+                    <span className="font-semibold text-white text-xs block group-hover:text-cyan-300">Sample Man</span>
+                    <span className="text-[10px] text-slate-400 block">Demo Portrait</span>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleAddPerson(sampleWomanImg, newPersonName || 'Woman Portrait')}
+                  className="p-2 bg-slate-950 border border-slate-800 hover:border-cyan-400 rounded-xl flex items-center gap-2 text-left transition-colors cursor-pointer group"
+                >
+                  <img src={sampleWomanImg} alt="Sample Woman" className="w-9 h-9 rounded-lg object-cover" />
+                  <div>
+                    <span className="font-semibold text-white text-xs block group-hover:text-cyan-300">Sample Woman</span>
+                    <span className="text-[10px] text-slate-400 block">Demo Portrait</span>
+                  </div>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

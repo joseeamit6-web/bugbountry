@@ -48,15 +48,86 @@ export function calculateAutoGridItems(
   return items;
 }
 
+export interface MultiPersonGridEntry {
+  id: string; // person or photo id
+  name: string;
+  widthMm: number;
+  heightMm: number;
+  copies: number;
+}
+
 /**
- * Renders the full print sheet at exact physical 300 DPI resolution
+ * Calculates a multi-person/multi-photo layout on the print sheet
+ * packing different people's passport photos with row wrapping and margin constraints.
+ */
+export function calculateMultiPersonGrid(
+  paper: PrintPaperFormat,
+  orientation: 'portrait' | 'landscape',
+  entries: MultiPersonGridEntry[],
+  marginMm: number = 8,
+  gapMm: number = 3
+): PrintPhotoItem[] {
+  const paperWidthMm = orientation === 'portrait' ? paper.widthMm : paper.heightMm;
+  const paperHeightMm = orientation === 'portrait' ? paper.heightMm : paper.widthMm;
+
+  const maxWidth = paperWidthMm - marginMm;
+  const maxHeight = paperHeightMm - marginMm;
+
+  const items: PrintPhotoItem[] = [];
+  let currentX = marginMm;
+  let currentY = marginMm;
+  let currentRowHeight = 0;
+  let itemCounter = 0;
+
+  for (const entry of entries) {
+    const w = entry.widthMm;
+    const h = entry.heightMm;
+
+    for (let c = 0; c < entry.copies; c++) {
+      // Check if item fits in current row
+      if (currentX + w > maxWidth + 0.1) {
+        // Move to next row
+        currentX = marginMm;
+        currentY += currentRowHeight + gapMm;
+        currentRowHeight = 0;
+      }
+
+      // Check if item fits on the page vertically
+      if (currentY + h > maxHeight + 0.1) {
+        // Exceeded paper height
+        break;
+      }
+
+      items.push({
+        id: `item_${entry.id}_${c}_${itemCounter++}`,
+        photoId: entry.id,
+        xMm: Number(currentX.toFixed(2)),
+        yMm: Number(currentY.toFixed(2)),
+        widthMm: w,
+        heightMm: h,
+        rotation: 0,
+        locked: false,
+      });
+
+      currentRowHeight = Math.max(currentRowHeight, h);
+      currentX += w + gapMm;
+    }
+  }
+
+  return items;
+}
+
+/**
+ * Renders the full print sheet at exact physical 300 DPI resolution.
+ * Supports multiple distinct photos placed on the same sheet simultaneously.
  */
 export function renderPrintSheetCanvas(
   sheetConfig: PrintSheetConfig,
   paper: PrintPaperFormat,
   croppedPhotoCanvas: HTMLCanvasElement,
   dpi: number = 300,
-  showCutLines: boolean = true
+  showCutLines: boolean = true,
+  photoCanvasesMap?: Record<string, HTMLCanvasElement | HTMLImageElement>
 ): HTMLCanvasElement {
   const paperWidthMm = sheetConfig.orientation === 'portrait' ? paper.widthMm : paper.heightMm;
   const paperHeightMm = sheetConfig.orientation === 'portrait' ? paper.heightMm : paper.widthMm;
@@ -82,6 +153,10 @@ export function renderPrintSheetCanvas(
     const wPx = mmToPixels(item.widthMm, dpi);
     const hPx = mmToPixels(item.heightMm, dpi);
 
+    const sourceDrawable = (item.photoId && photoCanvasesMap && photoCanvasesMap[item.photoId])
+      ? photoCanvasesMap[item.photoId]
+      : croppedPhotoCanvas;
+
     ctx.save();
     ctx.translate(xPx + wPx / 2, yPx + hPx / 2);
     if (item.rotation !== 0) {
@@ -89,7 +164,7 @@ export function renderPrintSheetCanvas(
     }
 
     // Draw photo copy
-    ctx.drawImage(croppedPhotoCanvas, -wPx / 2, -hPx / 2, wPx, hPx);
+    ctx.drawImage(sourceDrawable, -wPx / 2, -hPx / 2, wPx, hPx);
 
     // Optional subtle cutting guideline for scissors
     if (showCutLines) {
@@ -110,7 +185,8 @@ export function renderPrintSheetCanvas(
 export function executeDirectPrint(
   sheetConfig: PrintSheetConfig,
   paper: PrintPaperFormat,
-  croppedPhotoCanvas: HTMLCanvasElement
+  croppedPhotoCanvas: HTMLCanvasElement,
+  photoCanvasesMap?: Record<string, HTMLCanvasElement | HTMLImageElement>
 ): void {
   const mount = document.getElementById('print-mount-point');
   if (!mount) {
@@ -122,8 +198,8 @@ export function executeDirectPrint(
   mount.innerHTML = '';
   mount.className = 'block';
 
-  // Render 300 DPI sheet
-  const printCanvas = renderPrintSheetCanvas(sheetConfig, paper, croppedPhotoCanvas, 300, true);
+  // Render 300 DPI sheet with all multi-photo canvases
+  const printCanvas = renderPrintSheetCanvas(sheetConfig, paper, croppedPhotoCanvas, 300, true, photoCanvasesMap);
   const dataUrl = printCanvas.toDataURL('image/png');
 
   const img = document.createElement('img');
@@ -145,3 +221,4 @@ export function executeDirectPrint(
     }, 1000);
   }, 200);
 }
+

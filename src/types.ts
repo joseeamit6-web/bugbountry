@@ -48,10 +48,11 @@ export interface BackgroundSettings {
   isRemoved: boolean;
   mode: 'original' | 'color' | 'transparent';
   color: string;
-  tolerance: number; // 10 to 100
-  feather: number;   // 2 to 30
-  invertMask: boolean;
-  sampledBgColor?: { r: number; g: number; b: number };
+  model?: 'isnet-neural';
+  cutoutDataUrl?: string; // transparent cutout produced by AI neural model
+  tolerance?: number;
+  feather?: number;
+  invertMask?: boolean;
 }
 
 export interface RetouchPoint {
@@ -85,8 +86,21 @@ export interface PrintPaperFormat {
   description: string;
 }
 
+export interface SheetPhotoEntry {
+  id: string;
+  name: string;
+  presetName: string;
+  widthMm: number;
+  heightMm: number;
+  dataUrl: string;
+  sourceImageSrc?: string;
+  backgroundMode?: 'original' | 'color' | 'transparent';
+  backgroundColor?: string;
+}
+
 export interface PrintPhotoItem {
   id: string;
+  photoId?: string; // ID of sheet photo entry or undefined for primary photo
   xMm: number;
   yMm: number;
   widthMm: number;
@@ -107,6 +121,23 @@ export interface PrintSheetConfig {
   autoGrid: boolean;
 }
 
+export interface StudioPerson {
+  id: string;
+  name: string;
+  imageSrc: string;
+  naturalWidth: number;
+  naturalHeight: number;
+  adjustments: ImageAdjustments;
+  transformations: Transformations;
+  crop: CropState;
+  background: BackgroundSettings;
+  retouchStrokes: RetouchStroke[];
+  outfit: OutfitOverlay | null;
+  widthMm?: number;
+  heightMm?: number;
+  preparedCroppedCanvasUrl?: string;
+}
+
 export interface StudioProject {
   id: string;
   name: string;
@@ -121,4 +152,9 @@ export interface StudioProject {
   retouchStrokes: RetouchStroke[];
   outfit: OutfitOverlay | null;
   printSheet: PrintSheetConfig;
+  sheetPhotos?: SheetPhotoEntry[];
+  people?: StudioPerson[];
+  activePersonId?: string;
 }
+
+
